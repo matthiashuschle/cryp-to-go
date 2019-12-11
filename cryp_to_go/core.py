@@ -1,81 +1,128 @@
-"""
-Handles encryption. Based on the post of Ynon Perek:
+""" Handles encryption/decryption tasks.
+
+Inspired by Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
-from collections import namedtuple, OrderedDict
+import os
+from typing import Union, Dict
+from contextlib import contextmanager
+from collections import namedtuple
 import binascii
 import nacl.secret
 import nacl.utils
 import nacl.encoding
 import nacl.signing
 import nacl.pwhash
-from nacl.exceptions import BadSignatureError
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
 
 CHUNK_SIZE = 16 * 1024
-DerivedKey = namedtuple('DerivedKey', ['key_enc', 'key_sig', 'setup'])
+DerivedKey = namedtuple('DerivedKey', ['enc_key', 'sign_key', 'setup'])
 
 
-class AsymKeyPair:
+class AsymKey:
 
-    def __init__(self, pubkey=None, privkey=None):
-        """ Handles SSL key pair as cryptography object.
+    PRIVATE_KEY_DEFAULTS = [
+        'id_dsa',
+        'id_ecdsa',
+        'id_ed25519',
+        'id_rsa',
+    ]
+
+    def __init__(self, key):
+        """ Handles asymmetric encription of small data fragments.
 
         Intended for safe exchange of small data objects (like symmetric keys).
-        Both arguments must be cryptography library compatible RSA (or similar) Key
-        objects.
+        Key must be either private (encryption) or public (decryption) SSL key
+        as cryptography library compatible RSA (or similar) key objects.
         """
-        self.pubkey = pubkey
-        self.privkey = privkey
-        self.last_enc_info = None
-
-    def encrypt(self, message, to_str=True):
-        enc = self.pubkey.encrypt(
-            message,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
+        self.key = key
+        self.padding = padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
         )
-        if to_str:
-            return binascii.hexlify(enc).decode()
+
+    def encrypt(self, message):
+        enc = self.key.encrypt(
+            message,
+            self.padding,
+        )
         return enc
 
     def decrypt(self, encrypted):
-        try:
-            encrypted = binascii.unhexlify(encrypted.encode())
-        except AttributeError:
-            # already bytes
-            pass
-        original_message = self.privkey.decrypt(
+        original_message = self.key.decrypt(
             encrypted,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
+            self.padding,
         )
         return original_message
 
-    def encrypt_stream(self, stream_in, crypto_handler=None, enable_auth_key=False):
-        crypto_handler = crypto_handler or CryptoHandler.from_random(enable_auth_key)
-        yield from crypto_handler.encrypt_stream(stream_in)
-        self.last_enc_info = crypto_handler.create_info(keypair=self)
+    @classmethod
+    def from_pubkey_string(cls, pubkey_str):
+        """ Constructor from a public key string.
 
-    def decrypt_stream(self, stream_in, enc_info):
-        handler = CryptoHandler.from_info(enc_info, keypair=self)
-        yield from handler.decrypt_stream(stream_in, signature=handler.last_signature)
+        :param str pubkey_str: public key string
+        """
+        return cls(
+            key=serialization.load_ssh_public_key(
+                data=pubkey_str.encode(),
+                backend=default_backend()
+            )
+        )
+
+    @classmethod
+    def from_pubkey_file(cls, path):
+        """ Constructor from a public key file.
+
+        :param str path: public key filepath
+        """
+        with open(path, 'r') as f_in:
+            return cls.from_pubkey_string(f_in.read())
+
+    @classmethod
+    def privkey_from_pemfile(cls, path=None, password=None):
+        """ Constructor from a PEM file (default SSH).
+
+        :param str path: filepath, defaults to ~/.ssh/id_rsa
+            defaults to (SSH documentation):
+                ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519 or ~/.ssh/id_rsa
+        :param bytearray password: private key passphrase (bytearray!
+            Use getpass.getpass().encode() or similar, might not be hidden in ipython session!)
+        """
+        if not path:
+            # try default paths
+            for default_file in cls.PRIVATE_KEY_DEFAULTS:
+                default_path = os.path.expanduser(os.path.join('~', '.ssh', default_file))
+                if os.path.exists(default_path):
+                    path = default_path
+                    break
+        if not path or not os.path.exists(path):
+            raise OSError('no file found at: %r' % path)
+        with open(path, 'rb') as f_in:
+            return cls(
+                key=serialization.load_pem_private_key(
+                    data=f_in.read(),
+                    password=password,
+                    backend=default_backend(),
+                )
+            )
 
 
 class DerivedKeySetup:
-    def __init__(self, construct, ops, mem, key_size_enc, salt_key_enc,
-                 key_size_sig=None, salt_key_sig=None):
+    
+    def __init__(
+            self,
+            construct: str,
+            ops: int,
+            mem: int,
+            key_size_enc: int,
+            salt_key_enc: bytes,
+            key_size_sig: int,
+            salt_key_sig: bytes,
+    ):
         self.construct = construct
         self.ops = ops
         self.mem = mem
@@ -84,12 +131,44 @@ class DerivedKeySetup:
         self.salt_key_enc = salt_key_enc
         self.salt_key_sig = salt_key_sig
 
+    def to_dict(self) -> dict:
+        return {
+            'construct': self.construct,
+            'ops': self.ops,
+            'mem': self.mem,
+            'key_size_enc': self.key_size_enc,
+            'key_size_sig': self.key_size_sig,
+            'salt_key_enc': binascii.hexlify(self.salt_key_enc).decode(),
+            'salt_key_sig': binascii.hexlify(self.salt_key_sig).decode(),
+        }
+
     @classmethod
-    def create_default(cls, enable_auth_key=False):
+    def from_dict(cls, serialized: dict) -> "DerivedKeySetup":
+        return cls(
+            construct=serialized['construct'],
+            ops=serialized['ops'],
+            mem=serialized['mem'],
+            key_size_enc=serialized['key_size_enc'],
+            key_size_sig=serialized['key_size_sig'],
+            salt_key_enc=binascii.unhexlify(serialized['salt_key_enc'].encode()),
+            salt_key_sig=binascii.unhexlify(serialized['salt_key_sig'].encode()),
+        )
+
+    def copy(self) -> "DerivedKeySetup":
+        return DerivedKeySetup.from_dict(self.to_dict())
+
+    @classmethod
+    def create_default(cls, enable_signature_key: bool = False) -> "DerivedKeySetup":
         """ Create default settings for encryption key derivation from password.
 
-        original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
-        :param bool enable_auth_key: generate a key for full data signatures via HMAC
+        original source:
+        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+
+        :param bool enable_signature_key: generate a key for full data signatures via HMAC.
+            Usually not necessary, as each block is automatically signed. The only danger
+            is block loss and block order manipulation. Key generation is not free
+            (that's the idea), so it depends on your use case, whether it hurts usability.
+
         :rtype: DerivedKeySetup
         """
         return cls(
@@ -97,139 +176,144 @@ class DerivedKeySetup:
             mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
             construct='argon2i',
             salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
-            salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES) if enable_auth_key else b'',
+            salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES)
+            if enable_signature_key else b'',
             key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
-            key_size_sig=64 if enable_auth_key else 0
+            key_size_sig=64 if enable_signature_key else 0
         )
+    
+    def generate_keys(self, password: bytes) -> DerivedKey:
+        """ Create encryption and signature keys from a password.
 
+        Uses salt and resilient hashing. Returns the hashing settings, so the keys can be
+        recreated with the same password.
 
-def create_keys_from_password(password, setup=None, enable_auth_key=False):
-    """ Create encryption and signature keys from a password.
+        original source:
+        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
 
-    Uses salt and resilient hashing. Returns the hashing settings, so the keys can be recreated with the same password.
-    original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
-
-    :param bytes password: password as bytestring
-    :param DerivedKeySetup setup: settings for the hashing
-    :param bool enable_auth_key: generate a key for full data signatures via HMAC. Usually not necessary, as each block
-        is automatically signed. The only danger is block loss and block order manipulation.
-    :rtype: DerivedKey
-    """
-    setup = setup or DerivedKeySetup.create_default(enable_auth_key=enable_auth_key)
-    kdf = None
-    if setup.construct == 'argon2i':
-        kdf = nacl.pwhash.argon2i.kdf
-    if kdf is None:
-        raise AttributeError('construct %s is not implemented' % setup.construct)
-    key_enc = kdf(setup.key_size_enc, password, setup.salt_key_enc,
-                  opslimit=setup.ops, memlimit=setup.mem)
-    key_sig = kdf(setup.key_size_sig, password, setup.salt_key_sig,
-                  opslimit=setup.ops, memlimit=setup.mem) if setup.key_size_sig else b''
-    return DerivedKey(
-        key_enc=key_enc,
-        key_sig=key_sig,
-        setup=setup)
-
-
-def _chunk_nonce(base, index):
-    """ Creates incrementing nonces. Make sure that the base is different for each reset of index!
-
-    :param bytes base: random base for the nonces
-    :param int index: offset for the nonce
-    :rtype: bytes
-    """
-    size = nacl.secret.SecretBox.NONCE_SIZE
-    return int.to_bytes(int.from_bytes(base, byteorder='big') + index, length=size, byteorder='big')
+        :param bytes password: password as bytestring
+        :rtype: DerivedKey
+        """
+        kdf = None
+        if self.construct == 'argon2i':
+            kdf = nacl.pwhash.argon2i.kdf
+        if kdf is None:
+            raise AttributeError('construct %s is not implemented' % self.construct)
+        key_enc = kdf(self.key_size_enc, password, self.salt_key_enc,
+                      opslimit=self.ops, memlimit=self.mem)
+        key_sig = kdf(self.key_size_sig, password, self.salt_key_sig,
+                      opslimit=self.ops, memlimit=self.mem) if self.key_size_sig else b''
+        # set setup to a copy of self
+        return DerivedKey(
+            enc_key=key_enc,
+            sign_key=key_sig,
+            setup=self.copy(),
+        )
 
 
 class CryptoHandler:
 
-    def __init__(self, secret_key, auth_key=None):
+    def __init__(self, enc_key: bytes, sign_key: Union[None, bytes] = None):
         """ Handle symmetric encryption of data of any size.
 
-        :param bytes secret_key: encryption key
-        :param bytes auth_key: optional key for signing output with HMAC
+        :param bytes enc_key: encryption key
+        :param bytes sign_key: optional key for signing output with HMAC
         """
-        self.secret_box = None
-        self._secret_key = None
-        self.secret_key = secret_key
-        self.auth_key = auth_key  # for signing
-        self._last_signature = None
-
-    @classmethod
-    def from_random(cls, enable_auth_key=False):
-        key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
-        auth_key = nacl.utils.random(size=64) if enable_auth_key else None
-        return cls(key, auth_key)
-
-    @classmethod
-    def from_derived_keys(cls, derived_key):
-        """ Create encryption and signature keys from a DerivedKey isntance.
-
-        :param DerivedKey derived_key: created via password and settings
-        :rtype: CryptoHandler
-        """
-        inst = cls(secret_key=derived_key.key_enc, auth_key=derived_key.key_sig or None)
-        return inst
+        self._secret_box = None
+        self._enc_key = None
+        self.enc_key = enc_key
+        self._hmac = None
+        self.sign_key = sign_key  # for signing
+        self._signature = None
+        self.derivation_info = None
 
     @property
-    def last_signature(self):
-        """ After finalizing encryption, holds a signature, if auth_key is available.
-
-        :rtype: bytes
-        """
-        return self._last_signature
-
-    @last_signature.setter
-    def last_signature(self, val):
-        """ Set signature, ignore if signing via HMAC is disabled.
-
-        :param bytes val: new signature
-        """
-        if self.auth_key:
-            self._last_signature = binascii.hexlify(val)
-        else:
-            self._last_signature = None
+    def secret_box(self) -> nacl.secret.SecretBox:
+        """ Provides the NaCl SecretBox instance for using the encryption key. """
+        if self._secret_box is None:
+            self._secret_box = nacl.secret.SecretBox(self.enc_key)
+        return self._secret_box
 
     @property
-    def secret_key(self):
+    def enc_key(self) -> bytes:
         """ Secret encryption key.
 
         :rtype: bytes
         """
-        return self._secret_key
+        return self._enc_key
 
-    @secret_key.setter
-    def secret_key(self, val):
+    @enc_key.setter
+    def enc_key(self, val: bytes):
         """ Set encryption key. Also changes the SecretBox for crypto-operations.
 
         :param bytes val: new encryption key
         """
-        self._secret_key = val
-        self.secret_box = nacl.secret.SecretBox(val)
+        self._enc_key = val
+        self._secret_box = None
 
-    def init_hmac(self, force=False, dummy=False):
-        """ Creates a new HMAC instance if possible.
+    @property
+    def hmac(self) -> hmac.HMAC:
+        if self._hmac is None:
+            if self.sign_key:
+                self._hmac = hmac.HMAC(
+                    self.sign_key,
+                    hashes.SHA512(),
+                    backend=default_backend()
+                )
+            else:
+                class HMACDummy:
+                    """ A dummy that ignores the applied actions. """
+                    update = staticmethod(lambda data: None)
+                    finalize = staticmethod(lambda: b'')
+                    verify = staticmethod(lambda data: True)
+                self._hmac = HMACDummy()
+        return self._hmac
 
-        :param bool force: must return an HMAC handler, fails if not possible
-        :param bool dummy: force return of dummy handler
-        :rtype: hmac.HMAC
-        :raises RuntimeError if force is True, but no auth_key available
+    def reset_signature(self):
+        self._hmac = None
+        self._signature = None
+
+    @property
+    def signature(self) -> Union[None, bytes]:
+        if self._hmac is None:
+            return None
+        if self._signature is None:
+            self._signature = self.hmac.finalize()
+        return self._signature
+
+    @classmethod
+    def from_random(cls, enable_signature_key: bool = False) -> "CryptoHandler":
+        key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+        sign_key = nacl.utils.random(size=64) if enable_signature_key else None
+        return cls(key, sign_key)
+
+    @classmethod
+    def from_derived_key_setup(
+            cls, derived_key_setup: DerivedKeySetup, password: bytes
+    ) -> "CryptoHandler":
+        """ Constructor from a DerivedKeySetup.
+
+        :param DerivedKeySetup derived_key_setup: derivation setup
+        :param bytes password: initial password for key generation
+        :rtype: CryptoHandler
         """
-        if force and dummy:
-            raise AttributeError('must not set both, force and dummy')
-        if self.auth_key and not dummy:
-            return get_auth_hmac_from_key(self.auth_key)
-        else:
-            if force:
-                raise RuntimeError('no signature key given, but HMAC requested!')
+        derived_keys = derived_key_setup.generate_keys(password)
+        inst = cls(enc_key=derived_keys.enc_key, sign_key=derived_keys.sign_key)
+        inst.derivation_info = derived_keys.setup
+        return inst
 
-            class HMACDummy:
-                """ A dummy that ignores the applied actions. """
-                update = staticmethod(lambda data: None)
-                finalize = staticmethod(lambda: None)
-                verify = staticmethod(lambda data: True)
-            return HMACDummy
+    @contextmanager
+    def create_signature(self):
+        self.reset_signature()
+        yield
+        # access signature as self.signature here
+
+    @contextmanager
+    def verify_signature(self, signature: Union[bytes, None] = None):
+        self.reset_signature()
+        yield
+        if signature:
+            self.hmac.verify(signature)
 
     def encrypt_stream(self, plain_file_object, read_total=None):
         """ Here the encryption happens in chunks (generator).
@@ -241,146 +325,110 @@ class CryptoHandler:
         :param BytesIO plain_file_object: input file
         :param int read_total: maximum bytes to read
         :return: encrypted chunks
-        :rtype: bytes
         """
-        nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)  # default way of creating a nonce in nacl
-        auth_hmac = self.init_hmac()
-        # nacl adds nonce (24bytes) and signature (16 bytes), so read 40 bytes less than desired output size
+        # default way of creating a nonce in nacl
+        nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
+        # nacl adds nonce (24bytes) and signature (16 bytes),
+        # so read 40 bytes less than desired output size
         for index, chunk in enumerate(_read_in_chunks(
                 plain_file_object, chunk_size=CHUNK_SIZE - 40, read_total=read_total)
         ):
-            enc = self.secret_box.encrypt(chunk, _chunk_nonce(nonce, index))
-            auth_hmac.update(enc)
+            enc = self.secret_box.encrypt(chunk, _get_chunk_nonce(nonce, index))
+            self.hmac.update(enc)
             yield enc
-        self.last_signature = auth_hmac.finalize()
 
-    def sign_stream(self, enc_file_object, read_total=None):
-        """ Create HMAC for existing encrypted data stream.
-
-        :param BytesIO enc_file_object: encrypted data
-        :param int read_total: maximum bytes to read
-        :return: signature, hex-serialized
-        :rtype: bytes
-        """
-        auth_hmac = self.init_hmac(force=True)
-        return sign_stream(auth_hmac, enc_file_object, read_total=read_total)
-
-    def verify_stream(self, enc_file_object, signature, read_total=None):
-        """ Verify HMAC signature for encrypted data stream.
-
-        :param BytesIO enc_file_object: encrypted data
-        :param bytes signature: hex-serialized signature
-        :param int read_total: maximum bytes to read
-        :return: validity
-        :rtype: bool
-        """
-        auth_hmac = self.init_hmac(force=True)
-        return verify_stream(auth_hmac, enc_file_object, signature, read_total=read_total)
-
-    def decrypt_stream(self, enc_file_object, read_total=None, signature=None):
+    def decrypt_stream(self, enc_file_object, read_total=None):
         """ Decrypt encrypted stream. (generator)
 
         If auth_key and signature is provided, HMAC verification is done automatically.
 
         :param BytesIO enc_file_object: encrypted data stream
         :param int read_total: maximum bytes to read
-        :param signature: hex-serialized signature
         :return: plain data in chunks
         :rtype: bytes
         """
-        sig_bytes = binascii.unhexlify(signature) if signature else None
-        auth_hmac = self.init_hmac(force=signature is not None, dummy=signature is None)
         for chunk in _read_in_chunks(enc_file_object, read_total=read_total):
-            auth_hmac.update(chunk)
+            self.hmac.update(chunk)
             yield self.secret_box.decrypt(chunk)
-        auth_hmac.verify(sig_bytes)
 
-    @staticmethod
-    def get_unenc_block_size(enc_block_size):
-        """ Calculate how many unencrypted bytes amount to the desired encrypted amount.
-
-        :param enc_block_size: desired encrypted number of bytes
-        :return: size of unencrypted data
-        :rtype: int
-        :raises ValueError: if the target block size can not be created from the encryption chunk size.
-        """
-        if enc_block_size % CHUNK_SIZE:
-            raise ValueError('can not divide %i by %i!' % (enc_block_size, CHUNK_SIZE))
-        n_chunks = enc_block_size // CHUNK_SIZE
-        return n_chunks * (CHUNK_SIZE - 40)
-
-    def encrypt_keys_asymmetric(self, keypair):
+    def to_decrypt_info(self, public_key) -> Dict[str, Union[None, str]]:
         """ Use public key from asymmetric keypair to encrypt symmetric keys.
 
-        Use `to_str=False` to generate binary instead of hexlified.
+        Generates hexlified strings, so it's JSONifiable.
 
-        :param AsymKeyPair keypair: cryptography SSL RSA key pair or similar, see AsymKeyPair
-        :returns: tuple (encrypted secret key, encrypted auth key) where the latter might be None
+        :param AsymKey public_key: cryptography SSL RSA key (from pair) or similar, see AsymKey
+        :returns: Dict[str, Union[None, str]]
         """
-        enc_auth_key = None if not self.auth_key else keypair.encrypt(self.auth_key)
-        enc_secret_key = keypair.encrypt(self.secret_key)
-        return enc_secret_key, enc_auth_key
-
-    def create_info(self, keypair=None):
-        """ Create info dictionary, JSONifiable.
-
-        Should it store unencrypted keys?
-        If keypair is provided, they are encrypted by the public key.
-        """
-        enc_secret, enc_auth, signature = None, None, None
-        if self.last_signature:
-            signature = self.last_signature.decode()
-        if keypair:
-            enc_secret, enc_auth = self.encrypt_keys_asymmetric(keypair=keypair)
-        info = OrderedDict([
-            ('secret_key', enc_secret),
-            ('auth_key', enc_auth),
-            ('signature', signature),
-        ])
-        return info
+        info = {
+            'enc_key': self.enc_key,
+            'sign_key': self.sign_key,
+            'signature': self.signature,
+        }
+        info_enc = {}
+        for key, val in info.items():
+            if val is None:
+                continue
+            info_enc[key] = hexlify(public_key.encrypt(val))
+        return info_enc
 
     @classmethod
-    def from_info(cls, info: dict, keypair: AsymKeyPair):
-        """ Create handler from info dict. """
-        auth_key = keypair.decrypt(info['auth_key']) if info['auth_key'] is not None else None
-        secret_key = keypair.decrypt(info['secret_key'])
-        inst = cls(secret_key, auth_key)
-        inst._last_signature = info['signature'].encode()
-        return inst
+    @contextmanager
+    def decryptor_from_info(cls, decrypt_info, private_key):
+        info = {
+            key: private_key.decrypt(unhexlify(val))
+            for key, val in decrypt_info.items()
+        }
+        inst = cls(enc_key=info['enc_key'], sign_key=info.get('sign_key'))
+        with inst.verify_signature(info.get('signature')):
+            yield inst
 
 
-def pubkey_from_string(pubkey_str):
-    """ Create a cryptography public SSL key instance from a public key string.
+def get_unenc_block_size(enc_block_size):
+    """ Calculate how many unencrypted bytes amount to the desired encrypted amount.
 
-    :param str pubkey_str: public key string
+    An encrypted chunk is 40 Bytes longer than its unencrypted content.
+    Sometimes you need to create the encryption on the fly in larger chunks,
+    e.g. for an upload to cloud storage with much larger chunk size (N). So
+    if you aim for chunks of size N composed of chunks of size n with
+    (n - 40) Bytes of the orginal content you
+    can use the `read_total` argument of the encryption methods with the
+    size determined by this method: how often do I have to read (n - 40)
+    Bytes to get an encrypted size of N?
+
+    :param enc_block_size: desired encrypted number of bytes
+    :return: size of unencrypted data
+    :rtype: int
+    :raises ValueError: if the target block size can not be created from the encryption chunk size.
     """
-    return serialization.load_ssh_public_key(
-        data=pubkey_str.encode(),
-        backend=default_backend()
+    if enc_block_size % CHUNK_SIZE:
+        raise ValueError('can not divide %i by %i!' % (enc_block_size, CHUNK_SIZE))
+    n_chunks = enc_block_size // CHUNK_SIZE
+    return n_chunks * (CHUNK_SIZE - 40)
+
+
+def hexlify(binarray):
+    """ Binary to hex-string conversion. """
+    return binascii.hexlify(binarray).decode()
+
+
+def unhexlify(hexstr):
+    """ Hex-string to binary conversion. """
+    return binascii.unhexlify(hexstr.encode())
+
+
+def _get_chunk_nonce(base, index):
+    """ Creates incrementing nonces. Make sure that the base is different for each reset of index!
+
+    :param bytes base: random base for the nonces
+    :param int index: offset for the nonce
+    :rtype: bytes
+    """
+    size = nacl.secret.SecretBox.NONCE_SIZE
+    return int.to_bytes(
+        int.from_bytes(base, byteorder='big') + index,
+        length=size,
+        byteorder='big'
     )
-
-
-def pubkey_from_file(path):
-    """ Create a cryptography public SSL key instance from a public key file.
-
-    :param str path: public key filepath
-    """
-    with open(path, 'r') as f_in:
-        return pubkey_from_string(f_in.read())
-
-
-def privkey_from_pemfile(path, password=None):
-    """ Create a cryptography SSL private key instance from a PEM file (default SSH).
-
-    :param str path: filepath
-    :param bytearray password: private key passphrase (bytearray! Use getpass.getpass().encode() or similar)
-    """
-    with open(path, 'rb') as f_in:
-        return serialization.load_pem_private_key(
-            data=f_in.read(),
-            password=password,
-            backend=default_backend(),
-        )
 
 
 def _read_in_chunks(file_object, chunk_size=None, read_total=None):
@@ -406,149 +454,81 @@ def _read_in_chunks(file_object, chunk_size=None, read_total=None):
         read_yet += read_size
 
 
-def get_auth_hmac_from_key(auth_key):
-    """ Default instanciation of HMAC
-
-    :param bytes auth_key: secret key for signing data
-    :rtype: hmac.HMAC
-    """
-    return hmac.HMAC(auth_key, hashes.SHA512(), backend=default_backend())
-
-
-def sign_stream(auth_hmac, enc_file_object, read_total=None):
+def sign_stream(sign_key, enc_file_object, read_total=None):
     """ Sign a stream with a given HMAC handler. Suitable for large amounts of data.
 
-    :param hmac.HMAC auth_hmac: HMAC handler
+    :param bytes sign_key: signing key for HMAC
     :param BytesIO enc_file_object: encrypted stream
     :param int read_total: optional size limit for read().
-    :returns: hex-serialized signature
+    :returns: signature
     :rtype: bytes
     """
+    auth_hmac = hmac.HMAC(
+        sign_key,
+        hashes.SHA512(),
+        backend=default_backend()
+    )
     for chunk in _read_in_chunks(enc_file_object, read_total=read_total):
         auth_hmac.update(chunk)
-    return binascii.hexlify(auth_hmac.finalize())
+    return auth_hmac.finalize()
 
 
-def verify_stream(auth_hmac, enc_file_object, signature, read_total=None):
+def verify_stream(sign_key, enc_file_object, signature, read_total=None):
     """ Verify signed encrypted stream. Suitable for large amounts of data.
 
-    :param hmac.HMAC auth_hmac: HMAC handler
+    :param bytes sign_key: signing key for HMAC
     :param BytesIO enc_file_object: encrypted byte stream
-    :param bytes signature: hex-serialized signature
+    :param bytes signature: signature
     :param int read_total: maximum bytes to read
     :return: whether signature is valid
     :rtype: bool
     """
-    sig_bytes = binascii.unhexlify(signature)
+    auth_hmac = hmac.HMAC(
+        sign_key,
+        hashes.SHA512(),
+        backend=default_backend()
+    )
     for chunk in _read_in_chunks(enc_file_object, read_total=read_total):
         auth_hmac.update(chunk)
     try:
-        auth_hmac.verify(sig_bytes)
+        auth_hmac.verify(signature)
         return True
     except InvalidSignature:
         return False
 
 
-def sign_bytesio(enc_message):
-    """ Sign small and medium sized objects.
-
-    Uses public/private keys, but the private keys is thrown away, as it is cheap to produce and
-    there is no need to reuse.
-
-    :param bytes enc_message: encrypted data
-    :returns: hex-serialized verification key, signature
-    :rtype: tuple
-    """
-    signing_key = nacl.signing.SigningKey.generate()  # throwaway, I verify_keys are stored locally
-    signature = signing_key.sign(enc_message).signature
-    verify_key_hex = signing_key.verify_key.encode(encoder=nacl.encoding.HexEncoder)
-    return verify_key_hex, signature
-
-
-def verify_bytesio(enc_message, verify_key_hex, signature):
-    """ Verify asymmetrically signed bytesreams.
-
-    :param bytes enc_message: encrypted data
-    :param bytes verify_key_hex: serialized verification key
-    :param bytes signature: signature
-    """
-    verify_key = nacl.signing.VerifyKey(verify_key_hex, encoder=nacl.encoding.HexEncoder)
-    try:
-        verify_key.verify(enc_message, signature)
-    except BadSignatureError:
-        return False
-    return True
-
-
-def demo_asym_long():
+def demo_asym():
     import json
     from io import BytesIO
-
     # 1. create a file to be encrypted
     # 2. create an asymmetric keypair to exchange the encryption keys
     # 3. encrypt the file
     # 4. provide the encryption info
     # 5. decrypt
-
-    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
-
-    # load the keypair - public needed for encryption, private for decryption
-    keypair = AsymKeyPair(pubkey=pubkey_from_file(path_public_key))
-    # or: keypair = AsymKeyPair(pubkey=pubkey_from_string(pubkey_string))
-    # create CryptoHandler using throwaway keys. (alternative is derived key from password)
-    handler = CryptoHandler.from_random(enable_auth_key=True)
-    with open(path_to_encrypt + '.enc', 'wb') as f_out:
-        with open(path_to_encrypt, 'rb') as f_in:
-            for chunk in handler.encrypt_stream(f_in):
-                f_out.write(chunk)
-    # keypair is needed to encrypt the symmetric keys
-    enc_info = handler.create_info(keypair=keypair)
-    print(json.dumps(enc_info, indent=4))
-    # print the real keys for comparison
-    print('secret_key unencrypted:', binascii.hexlify(handler.secret_key).decode())
-    print('auth_key unencrypted:', binascii.hexlify(handler.auth_key).decode())
-    # delete all traces
-    del keypair
-    del handler
-    # decrypt
-    keypair = AsymKeyPair(privkey=privkey_from_pemfile(path_private_key))
-    handler = CryptoHandler.from_info(enc_info, keypair=keypair)
-    assert handler.last_signature is not None
-    buffer = BytesIO()
-    with open(path_to_encrypt + '.enc', 'rb') as f_in:
-        for chunk in handler.decrypt_stream(f_in, signature=handler.last_signature):
-            buffer.write(chunk)
-    buffer.seek(0)
-    decrypted = buffer.read().decode()
-    assert decrypted == 'The cake is a lie!\n' * 10000
-    import os
-    for path in [path_private_key, path_public_key, path_to_encrypt]:
-        os.remove(path)
-
-
-def demo_asym_short():
-    import json
-    from io import BytesIO
     path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
     # encrypt, using generated symmetric keys and public key
-    keypair = AsymKeyPair(pubkey=pubkey_from_file(path_public_key))
+    pubkey = AsymKey.from_pubkey_file(path_public_key)
+    # signature key is optional
+    handler = CryptoHandler.from_random(enable_signature_key=True)
     with open(path_to_encrypt + '.enc', 'wb+') as f_out:
         with open(path_to_encrypt, 'rb') as f_in:
-            # enable_auth_key is optional. Check create_keys_from_password for more info
-            for chunk in keypair.encrypt_stream(f_in, enable_auth_key=True):
-                f_out.write(chunk)
+            with handler.create_signature():
+                for chunk in handler.encrypt_stream(f_in):
+                    f_out.write(chunk)
         f_out.seek(0)
         print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
     # exchange only enc_info (JSONifiable)
-    enc_info = keypair.last_enc_info
-    del keypair
-    print(json.dumps(enc_info, indent=4))
+    decrypt_info = handler.to_decrypt_info(pubkey)
+    del pubkey
+    del handler
+    print(json.dumps(decrypt_info, indent=4))
     # decrypt, using symmetric keys retrieved via private key
-    keypair = AsymKeyPair(privkey=privkey_from_pemfile(path_private_key))
+    privkey = AsymKey.privkey_from_pemfile(path_private_key)
     buffer = BytesIO()  # use BytesIO instead of yet another file
-    with open(path_to_encrypt + '.enc', 'rb') as f_in:
-        for chunk in keypair.decrypt_stream(f_in, enc_info):
-            buffer.write(chunk)
+    with CryptoHandler.decryptor_from_info(decrypt_info, privkey) as handler:
+        with open(path_to_encrypt + '.enc', 'rb') as f_in:
+            for chunk in handler.decrypt_stream(f_in):
+                buffer.write(chunk)
     buffer.seek(0)
     decrypted = buffer.read().decode()
     assert decrypted == 'The cake is a lie!\n' * 10000
@@ -607,29 +587,36 @@ def demo_sym():
     os.remove(path_public_key)
     # pick any password
     password = "supersecret".encode()
-    # enable_auth_key is optional
-    derived_keys = create_keys_from_password(password, enable_auth_key=True)
-    handler = CryptoHandler.from_derived_keys(derived_keys)
+    # enable_signature_key is optional
+    key_setup = DerivedKeySetup.create_default(enable_signature_key=True)
+    handler = CryptoHandler.from_derived_key_setup(
+        key_setup,
+        password,
+    )
     with open(path_to_encrypt + '.enc', 'wb+') as f_out:
         with open(path_to_encrypt, 'rb') as f_in:
-            for chunk in handler.encrypt_stream(f_in):
-                f_out.write(chunk)
-        f_out.seek(0)
-        print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
+            with handler.create_signature():
+                for chunk in handler.encrypt_stream(f_in):
+                    f_out.write(chunk)
+            f_out.seek(0)
+            print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
     # store public information
-    signature = handler.last_signature  # for validation
-    key_setup = derived_keys.setup  # for key creation
+    signature = hexlify(handler.signature)  # for validation
+    key_setup_dict = key_setup.to_dict()
     # remove handler
     del handler
-    del derived_keys
+    del key_setup
     # decrypt
-    derived_keys = create_keys_from_password(
-        password, enable_auth_key=True, setup=key_setup)
-    handler = CryptoHandler.from_derived_keys(derived_keys)
-    buffer = BytesIO()  # use BytesIO instead of yet another file
+    handler = CryptoHandler.from_derived_key_setup(
+        DerivedKeySetup.from_dict(key_setup_dict),
+        password,
+    )
+    # use BytesIO instead of yet another file
+    buffer = BytesIO()
     with open(path_to_encrypt + '.enc', 'rb') as f_in:
-        for chunk in handler.decrypt_stream(f_in, signature=signature):
-            buffer.write(chunk)
+        with handler.verify_signature(unhexlify(signature)):
+            for chunk in handler.decrypt_stream(f_in):
+                buffer.write(chunk)
     buffer.seek(0)
     decrypted = buffer.read().decode()
     assert decrypted == 'The cake is a lie!\n' * 10000
@@ -637,6 +624,5 @@ def demo_sym():
 
 
 if __name__ == '__main__':
-    demo_asym_long()
-    demo_asym_short()
+    demo_asym()
     demo_sym()

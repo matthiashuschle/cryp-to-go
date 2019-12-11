@@ -5,7 +5,7 @@ setup(
     version='',
     packages=[''],
     package_dir={'': 'tests'},
-    install_requires=['pynacl>=1.3.0', 'cryptography>=2.8 '],
+    install_requires=['pynacl>=1.3.0', 'cryptography>=2.8', 'pytest'],
     url='',
     license='',
     author='matthias',
