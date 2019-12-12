@@ -3,25 +3,27 @@ from unittest.mock import patch
 from io import BytesIO
 import os
 import tempfile
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 import nacl.utils
 import nacl.secret
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryp_to_go import core
 
-SIZE_BUFFER_IDDQD = 1200
+SIZE_BUFFER_A = 1200
 
 @pytest.fixture
-def content_iddqd():
+def content_a():
     return 'IDDQD\n'.encode() * 200
 
 
 @pytest.fixture
-def buffer_iddqd(content_iddqd):
-    content = content_iddqd
+def buffer_a(content_a):
+    content = content_a
     buffer = BytesIO()
     buffer.write(content)
     total_size = buffer.tell()
-    assert total_size == SIZE_BUFFER_IDDQD
+    assert total_size == SIZE_BUFFER_A
     return buffer
 
 
@@ -30,7 +32,7 @@ def test_get_unenc_block_size():
     assert core.get_unenc_block_size(core.CHUNK_SIZE) == core.CHUNK_SIZE - 40
     # try chunk size 100 and block size 2000. That's 20 blocks of 60 unencrypted
     with patch('cryp_to_go.core.CHUNK_SIZE', 100):
-        assert core.get_unenc_block_size(2000) == SIZE_BUFFER_IDDQD
+        assert core.get_unenc_block_size(2000) == SIZE_BUFFER_A
     # impossible task: read block size not alignable with chunk size
     with patch('cryp_to_go.core.CHUNK_SIZE', 100):
         with pytest.raises(ValueError):
@@ -51,15 +53,15 @@ def test_get_chunk_nonce():
     assert len(core._get_chunk_nonce(base, 1)) == len(base)
 
 
-def test_read_in_chunks(content_iddqd, buffer_iddqd):
-    buffer = buffer_iddqd
-    content = content_iddqd
+def test_read_in_chunks(content_a, buffer_a):
+    buffer = buffer_a
+    content = content_a
     # read with different chunk sizes
     for chunk_size in [None, 10, 100, 10000]:
         buffer.seek(0)
         chunks = [x for x in core._read_in_chunks(buffer, chunk_size=chunk_size)]
         assert all(len(x) == chunk_size for x in chunks[:-1])
-        assert sum(len(x) for x in chunks) == SIZE_BUFFER_IDDQD
+        assert sum(len(x) for x in chunks) == SIZE_BUFFER_A
         assert b''.join(chunks) == content
     # try different read_total
     buffer.seek(0)
@@ -84,8 +86,8 @@ def test_read_in_chunks(content_iddqd, buffer_iddqd):
     assert b''.join(chunks) == content[:250]
 
 
-def test_sign_verify(content_iddqd, buffer_iddqd):
-    content, buffer = content_iddqd, buffer_iddqd
+def test_sign_verify(content_a, buffer_a):
+    content, buffer = content_a, buffer_a
     # succeed unlimited read
     buffer.seek(0)
     sign_key = core.CryptoHandler.from_random(enable_signature_key=True).sign_key
@@ -117,10 +119,63 @@ def test_sign_verify(content_iddqd, buffer_iddqd):
     assert not core.verify_stream(sign_key, buffer, signature_3, read_total=599)
 
 
+def _touch_temp_file():
+    fd, path = tempfile.mkstemp()
+    os.close(fd)
+    return path
+
+@pytest.fixture()
+def path_asym_keys():
+    # generate a keypair
+    asym_key = rsa.generate_private_key(
+        backend=default_backend(),
+        public_exponent=65537,
+        key_size=2048
+    )
+    path_private_key = _touch_temp_file()
+    with open(path_private_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()
+            )
+        )
+    path_public_key = _touch_temp_file()
+    with open(path_public_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.public_key().public_bytes(
+                serialization.Encoding.OpenSSH,
+                serialization.PublicFormat.OpenSSH
+            )
+        )
+    return path_private_key, path_public_key
+
+
 class TestAsymKey:
 
-    def test_constructors(self):
-        pass
+    def test_constructors(self, path_asym_keys):
+        path_privkey, path_pubkey = path_asym_keys
+        privkey = core.AsymKey.privkey_from_pemfile(path_privkey)
+        pubkey = core.AsymKey.from_pubkey_file(path_pubkey)
+        assert privkey.key is not None
+        assert pubkey.key is not None
+        with open(path_pubkey, 'r') as f_in:
+            pubkey_2 = core.AsymKey.from_pubkey_string(f_in.read())
+        assert pubkey_2.key.public_numbers() == pubkey.key.public_numbers()
+        assert pubkey.key.public_numbers() == privkey.key.public_key().public_numbers()
+
+    def test_encrypt_decrypt(self, path_asym_keys):
+        path_privkey, path_pubkey = path_asym_keys
+        privkey = core.AsymKey.privkey_from_pemfile(path_privkey)
+        pubkey = core.AsymKey.from_pubkey_file(path_pubkey)
+        assert privkey.decrypt(pubkey.encrypt(b'foobar')) == b'foobar'
+
+
+class TestDerivedKeySetup:
+
+    pass
+
 
 # @pytest.fixture(scope='module')
 # def encrypt_file_path():
