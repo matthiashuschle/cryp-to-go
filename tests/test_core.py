@@ -8,9 +8,11 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 import nacl.utils
 import nacl.secret
+import nacl.pwhash
 from cryp_to_go import core
 
 SIZE_BUFFER_A = 1200
+
 
 @pytest.fixture
 def content_a():
@@ -124,6 +126,7 @@ def _touch_temp_file():
     os.close(fd)
     return path
 
+
 @pytest.fixture()
 def path_asym_keys():
     # generate a keypair
@@ -174,8 +177,40 @@ class TestAsymKey:
 
 class TestDerivedKeySetup:
 
-    pass
+    def test_general(self):
+        dks = core.DerivedKeySetup.create_default(enable_signature_key=True)
+        # override defaults for faster tests
+        dks.ops = nacl.pwhash.argon2i.OPSLIMIT_MIN
+        dks.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
+        password_1 = b'supersecret_1'
+        password_2 = b'supersecret_2'
+        derived_keys = dks.generate_keys(password_1)
+        derived_keys_1b = derived_keys.setup.generate_keys(password_1)
+        assert derived_keys.enc_key == derived_keys_1b.enc_key
+        assert derived_keys.sign_key == derived_keys_1b.sign_key
+        assert derived_keys.setup.to_dict() == derived_keys_1b.setup.to_dict()
+        assert dks.to_dict() == derived_keys.setup.to_dict()
+        derived_keys_2 = dks.generate_keys(password_2)
+        assert derived_keys_2.setup.to_dict() == dks.to_dict()
+        assert derived_keys_2.enc_key != derived_keys.enc_key
+        assert derived_keys_2.sign_key != derived_keys.sign_key
+        assert derived_keys.enc_key != derived_keys.sign_key
+        # create with a different salt
+        dks2 = core.DerivedKeySetup.create_default(enable_signature_key=False)
+        # override defaults for faster tests
+        dks2.ops = nacl.pwhash.argon2i.OPSLIMIT_MIN
+        dks2.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
+        assert dks2.generate_keys(password_1).enc_key != derived_keys.enc_key
+        # serialize and deserialize
+        dks3 = core.DerivedKeySetup.from_dict(derived_keys.setup.to_dict())
+        assert dks3.generate_keys(password_1).enc_key == derived_keys.enc_key
 
+
+class TestCryptoHandler:
+
+    def test_init(self):
+        pass
+        # ToDo
 
 # @pytest.fixture(scope='module')
 # def encrypt_file_path():
