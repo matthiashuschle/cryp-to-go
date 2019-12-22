@@ -6,7 +6,6 @@ https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-
 import os
 from typing import Union, Dict
 from contextlib import contextmanager
-from collections import namedtuple
 import binascii
 import nacl.secret
 import nacl.utils
@@ -20,8 +19,21 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.exceptions import InvalidSignature
 
 CHUNK_SIZE = 16 * 1024
-DerivedKey = namedtuple('DerivedKey', ['enc_key', 'sign_key', 'setup'])
 
+
+class EncryptionKey:
+    
+    def __init__(self, key_enc, key_sign, setup=None):
+        self.key_enc = key_enc
+        self.key_sign = key_sign
+        self.setup = setup
+
+    @classmethod
+    def create_random(cls, enable_signature_key: bool = False) -> "EncryptionKey":
+        key_enc = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+        key_sign = nacl.utils.random(size=64) if enable_signature_key else None
+        return cls(key_enc, key_sign)
+        
 
 class AsymKey:
 
@@ -46,14 +58,14 @@ class AsymKey:
             label=None
         )
 
-    def encrypt(self, message):
+    def encrypt(self, message: bytes) -> bytes:
         enc = self.key.encrypt(
             message,
             self.padding,
         )
         return enc
 
-    def decrypt(self, encrypted):
+    def decrypt(self, encrypted: bytes) -> bytes:
         original_message = self.key.decrypt(
             encrypted,
             self.padding,
@@ -111,7 +123,7 @@ class AsymKey:
             )
 
 
-class DerivedKeySetup:
+class KeyDerivationSetup:
     
     def __init__(
             self,
@@ -143,7 +155,7 @@ class DerivedKeySetup:
         }
 
     @classmethod
-    def from_dict(cls, serialized: dict) -> "DerivedKeySetup":
+    def from_dict(cls, serialized: dict) -> "KeyDerivationSetup":
         return cls(
             construct=serialized['construct'],
             ops=serialized['ops'],
@@ -154,11 +166,11 @@ class DerivedKeySetup:
             salt_key_sig=binascii.unhexlify(serialized['salt_key_sig'].encode()),
         )
 
-    def copy(self) -> "DerivedKeySetup":
-        return DerivedKeySetup.from_dict(self.to_dict())
+    def copy(self) -> "KeyDerivationSetup":
+        return KeyDerivationSetup.from_dict(self.to_dict())
 
     @classmethod
-    def create_default(cls, enable_signature_key: bool = False) -> "DerivedKeySetup":
+    def create_default(cls, enable_signature_key: bool = False) -> "KeyDerivationSetup":
         """ Create default settings for encryption key derivation from password.
 
         original source:
@@ -169,7 +181,7 @@ class DerivedKeySetup:
             is block loss and block order manipulation. Key generation is not free
             (that's the idea), so it depends on your use case, whether it hurts usability.
 
-        :rtype: DerivedKeySetup
+        :rtype: KeyDerivationSetup
         """
         return cls(
             ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
@@ -182,7 +194,7 @@ class DerivedKeySetup:
             key_size_sig=64 if enable_signature_key else 0
         )
     
-    def generate_keys(self, password: bytes) -> DerivedKey:
+    def generate_keys(self, password: bytes) -> EncryptionKey:
         """ Create encryption and signature keys from a password.
 
         Uses salt and resilient hashing. Returns the hashing settings, so the keys can be
@@ -201,62 +213,57 @@ class DerivedKeySetup:
             raise AttributeError('construct %s is not implemented' % self.construct)
         key_enc = kdf(self.key_size_enc, password, self.salt_key_enc,
                       opslimit=self.ops, memlimit=self.mem)
-        key_sig = kdf(self.key_size_sig, password, self.salt_key_sig,
-                      opslimit=self.ops, memlimit=self.mem) if self.key_size_sig else b''
+        key_sign = kdf(self.key_size_sig, password, self.salt_key_sig,
+                       opslimit=self.ops, memlimit=self.mem) if self.key_size_sig else b''
         # set setup to a copy of self
-        return DerivedKey(
-            enc_key=key_enc,
-            sign_key=key_sig,
-            setup=self.copy(),
-        )
+        return EncryptionKey(key_enc, key_sign, setup=self.copy())
 
 
 class CryptoHandler:
 
-    def __init__(self, enc_key: bytes, sign_key: Union[None, bytes] = None):
+    def __init__(self, key_enc: bytes, key_sign: Union[None, bytes] = None):
         """ Handle symmetric encryption of data of any size.
 
-        :param bytes enc_key: encryption key
-        :param bytes sign_key: optional key for signing output with HMAC
+        :param bytes key_enc: encryption key
+        :param bytes key_sign: optional key for signing output with HMAC
         """
         self._secret_box = None
-        self._enc_key = None
-        self.enc_key = enc_key
+        self._key_enc = None
+        self.key_enc = key_enc
         self._hmac = None
-        self.sign_key = sign_key  # for signing
+        self.key_sign = key_sign  # for signing
         self._signature = None
-        self.derivation_info = None
 
     @property
     def secret_box(self) -> nacl.secret.SecretBox:
         """ Provides the NaCl SecretBox instance for using the encryption key. """
         if self._secret_box is None:
-            self._secret_box = nacl.secret.SecretBox(self.enc_key)
+            self._secret_box = nacl.secret.SecretBox(self.key_enc)
         return self._secret_box
 
     @property
-    def enc_key(self) -> bytes:
+    def key_enc(self) -> bytes:
         """ Secret encryption key.
 
         :rtype: bytes
         """
-        return self._enc_key
+        return self._key_enc
 
-    @enc_key.setter
-    def enc_key(self, val: bytes):
+    @key_enc.setter
+    def key_enc(self, val: bytes):
         """ Set encryption key. Also changes the SecretBox for crypto-operations.
 
         :param bytes val: new encryption key
         """
-        self._enc_key = val
+        self._key_enc = val
         self._secret_box = None
 
     @property
     def hmac(self) -> hmac.HMAC:
         if self._hmac is None:
-            if self.sign_key:
+            if self.key_sign:
                 self._hmac = hmac.HMAC(
-                    self.sign_key,
+                    self.key_sign,
                     hashes.SHA512(),
                     backend=default_backend()
                 )
@@ -264,7 +271,7 @@ class CryptoHandler:
                 class HMACDummy:
                     """ A dummy that ignores the applied actions. """
                     update = staticmethod(lambda data: None)
-                    finalize = staticmethod(lambda: b'')
+                    finalize = staticmethod(lambda: None)
                     verify = staticmethod(lambda data: True)
                 self._hmac = HMACDummy()
         return self._hmac
@@ -282,25 +289,8 @@ class CryptoHandler:
         return self._signature
 
     @classmethod
-    def from_random(cls, enable_signature_key: bool = False) -> "CryptoHandler":
-        key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
-        sign_key = nacl.utils.random(size=64) if enable_signature_key else None
-        return cls(key, sign_key)
-
-    @classmethod
-    def from_derived_key_setup(
-            cls, derived_key_setup: DerivedKeySetup, password: bytes
-    ) -> "CryptoHandler":
-        """ Constructor from a DerivedKeySetup.
-
-        :param DerivedKeySetup derived_key_setup: derivation setup
-        :param bytes password: initial password for key generation
-        :rtype: CryptoHandler
-        """
-        derived_keys = derived_key_setup.generate_keys(password)
-        inst = cls(enc_key=derived_keys.enc_key, sign_key=derived_keys.sign_key)
-        inst.derivation_info = derived_keys.setup
-        return inst
+    def from_encryption_key(cls, encryption_key: EncryptionKey) -> "CryptoHandler":
+        return cls(encryption_key.key_enc, encryption_key.key_sign)
 
     @contextmanager
     def create_signature(self):
@@ -360,8 +350,8 @@ class CryptoHandler:
         :returns: Dict[str, Union[None, str]]
         """
         info = {
-            'enc_key': self.enc_key,
-            'sign_key': self.sign_key,
+            'key_enc': self.key_enc,
+            'key_sign': self.key_sign,
             'signature': self.signature,
         }
         info_enc = {}
@@ -378,7 +368,7 @@ class CryptoHandler:
             key: private_key.decrypt(unhexlify(val))
             for key, val in decrypt_info.items()
         }
-        inst = cls(enc_key=info['enc_key'], sign_key=info.get('sign_key'))
+        inst = cls(key_enc=info['key_enc'], key_sign=info.get('key_sign'))
         with inst.verify_signature(info.get('signature')):
             yield inst
 
@@ -454,17 +444,17 @@ def _read_in_chunks(file_object, chunk_size=None, read_total=None):
         read_yet += read_size
 
 
-def sign_stream(sign_key, enc_file_object, read_total=None):
+def sign_stream(key_sign, enc_file_object, read_total=None):
     """ Sign a stream with a given HMAC handler. Suitable for large amounts of data.
 
-    :param bytes sign_key: signing key for HMAC
+    :param bytes key_sign: signing key for HMAC
     :param BytesIO enc_file_object: encrypted stream
     :param int read_total: optional size limit for read().
     :returns: signature
     :rtype: bytes
     """
     auth_hmac = hmac.HMAC(
-        sign_key,
+        key_sign,
         hashes.SHA512(),
         backend=default_backend()
     )
@@ -473,10 +463,10 @@ def sign_stream(sign_key, enc_file_object, read_total=None):
     return auth_hmac.finalize()
 
 
-def verify_stream(sign_key, enc_file_object, signature, read_total=None):
+def verify_stream(key_sign, enc_file_object, signature, read_total=None):
     """ Verify signed encrypted stream. Suitable for large amounts of data.
 
-    :param bytes sign_key: signing key for HMAC
+    :param bytes key_sign: signing key for HMAC
     :param BytesIO enc_file_object: encrypted byte stream
     :param bytes signature: signature
     :param int read_total: maximum bytes to read
@@ -484,7 +474,7 @@ def verify_stream(sign_key, enc_file_object, signature, read_total=None):
     :rtype: bool
     """
     auth_hmac = hmac.HMAC(
-        sign_key,
+        key_sign,
         hashes.SHA512(),
         backend=default_backend()
     )
@@ -495,134 +485,3 @@ def verify_stream(sign_key, enc_file_object, signature, read_total=None):
         return True
     except InvalidSignature:
         return False
-
-
-def demo_asym():
-    import json
-    from io import BytesIO
-    # 1. create a file to be encrypted
-    # 2. create an asymmetric keypair to exchange the encryption keys
-    # 3. encrypt the file
-    # 4. provide the encryption info
-    # 5. decrypt
-    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
-    # encrypt, using generated symmetric keys and public key
-    pubkey = AsymKey.from_pubkey_file(path_public_key)
-    # signature key is optional
-    handler = CryptoHandler.from_random(enable_signature_key=True)
-    with open(path_to_encrypt + '.enc', 'wb+') as f_out:
-        with open(path_to_encrypt, 'rb') as f_in:
-            with handler.create_signature():
-                for chunk in handler.encrypt_stream(f_in):
-                    f_out.write(chunk)
-        f_out.seek(0)
-        print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
-    # exchange only enc_info (JSONifiable)
-    decrypt_info = handler.to_decrypt_info(pubkey)
-    del pubkey
-    del handler
-    print(json.dumps(decrypt_info, indent=4))
-    # decrypt, using symmetric keys retrieved via private key
-    privkey = AsymKey.privkey_from_pemfile(path_private_key)
-    buffer = BytesIO()  # use BytesIO instead of yet another file
-    with CryptoHandler.decryptor_from_info(decrypt_info, privkey) as handler:
-        with open(path_to_encrypt + '.enc', 'rb') as f_in:
-            for chunk in handler.decrypt_stream(f_in):
-                buffer.write(chunk)
-    buffer.seek(0)
-    decrypted = buffer.read().decode()
-    assert decrypted == 'The cake is a lie!\n' * 10000
-    import os
-    for path in [path_private_key, path_public_key, path_to_encrypt]:
-        os.remove(path)
-
-
-def _prepare_demo():
-    import os
-    import tempfile
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    # create temporary file and close
-    def _touch():
-        fd, path = tempfile.mkstemp()
-        os.close(fd)
-        return path
-
-    # create file to encrypt
-    path_to_encrypt = _touch()
-    with open(path_to_encrypt, 'w') as f_out:
-        f_out.write('The cake is a lie!\n' * 10000)
-    # generate a keypair
-    asym_key = rsa.generate_private_key(
-        backend=default_backend(),
-        public_exponent=65537,
-        key_size=2048
-    )
-    path_private_key = _touch()
-    with open(path_private_key, 'wb') as f_out:
-        f_out.write(
-            asym_key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption()
-            )
-        )
-    path_public_key = _touch()
-    with open(path_public_key, 'wb') as f_out:
-        f_out.write(
-            asym_key.public_key().public_bytes(
-                serialization.Encoding.OpenSSH,
-                serialization.PublicFormat.OpenSSH
-            )
-        )
-    return path_private_key, path_public_key, path_to_encrypt
-
-
-def demo_sym():
-    import os
-    from io import BytesIO
-    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
-    # we don't need the keypair
-    os.remove(path_private_key)
-    os.remove(path_public_key)
-    # pick any password
-    password = "supersecret".encode()
-    # enable_signature_key is optional
-    key_setup = DerivedKeySetup.create_default(enable_signature_key=True)
-    handler = CryptoHandler.from_derived_key_setup(
-        key_setup,
-        password,
-    )
-    with open(path_to_encrypt + '.enc', 'wb+') as f_out:
-        with open(path_to_encrypt, 'rb') as f_in:
-            with handler.create_signature():
-                for chunk in handler.encrypt_stream(f_in):
-                    f_out.write(chunk)
-            f_out.seek(0)
-            print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
-    # store public information
-    signature = hexlify(handler.signature)  # for validation
-    key_setup_dict = key_setup.to_dict()
-    # remove handler
-    del handler
-    del key_setup
-    # decrypt
-    handler = CryptoHandler.from_derived_key_setup(
-        DerivedKeySetup.from_dict(key_setup_dict),
-        password,
-    )
-    # use BytesIO instead of yet another file
-    buffer = BytesIO()
-    with open(path_to_encrypt + '.enc', 'rb') as f_in:
-        with handler.verify_signature(unhexlify(signature)):
-            for chunk in handler.decrypt_stream(f_in):
-                buffer.write(chunk)
-    buffer.seek(0)
-    decrypted = buffer.read().decode()
-    assert decrypted == 'The cake is a lie!\n' * 10000
-    os.remove(path_to_encrypt)
-
-
-if __name__ == '__main__':
-    demo_asym()
-    demo_sym()

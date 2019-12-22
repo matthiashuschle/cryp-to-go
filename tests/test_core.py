@@ -6,6 +6,7 @@ import tempfile
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
+from cryptography.exceptions import InvalidSignature
 import nacl.utils
 import nacl.secret
 import nacl.pwhash
@@ -92,33 +93,37 @@ def test_sign_verify(content_a, buffer_a):
     content, buffer = content_a, buffer_a
     # succeed unlimited read
     buffer.seek(0)
-    sign_key = core.CryptoHandler.from_random(enable_signature_key=True).sign_key
-    signature = core.sign_stream(sign_key, buffer)
+    key_sign = core.CryptoHandler.from_encryption_key(
+        core.EncryptionKey.create_random(enable_signature_key=True)
+    ).key_sign
+    signature = core.sign_stream(key_sign, buffer)
     buffer.seek(0)
-    core.verify_stream(sign_key, buffer, signature)
+    core.verify_stream(key_sign, buffer, signature)
     # repeat, should create same signature
     buffer.seek(0)
-    assert signature == core.sign_stream(sign_key, buffer)
+    assert signature == core.sign_stream(key_sign, buffer)
     # try different sign key
     buffer.seek(0)
-    sign_key_2 = core.CryptoHandler.from_random(enable_signature_key=True).sign_key
+    sign_key_2 = core.CryptoHandler.from_encryption_key(
+        core.EncryptionKey.create_random(enable_signature_key=True)
+    ).key_sign
     signature_2 = core.sign_stream(sign_key_2, buffer)
     assert signature_2 != signature
     # use wrong signature
     buffer.seek(0)
-    assert not core.verify_stream(sign_key, buffer, signature_2)
+    assert not core.verify_stream(key_sign, buffer, signature_2)
     buffer.seek(0)
     assert not core.verify_stream(sign_key_2, buffer, signature)
     # succeed limited read
     buffer.seek(0)
-    signature_3 = core.sign_stream(sign_key, buffer, read_total=600)
+    signature_3 = core.sign_stream(key_sign, buffer, read_total=600)
     buffer.seek(0)
-    core.verify_stream(sign_key, buffer, signature_3, read_total=600)
+    core.verify_stream(key_sign, buffer, signature_3, read_total=600)
     # check if signature differs
     assert signature_3 != signature
     buffer.seek(0)
     # read wrong size -> fail
-    assert not core.verify_stream(sign_key, buffer, signature_3, read_total=599)
+    assert not core.verify_stream(key_sign, buffer, signature_3, read_total=599)
 
 
 def _touch_temp_file():
@@ -178,7 +183,7 @@ class TestAsymKey:
 class TestDerivedKeySetup:
 
     def test_general(self):
-        dks = core.DerivedKeySetup.create_default(enable_signature_key=True)
+        dks = core.KeyDerivationSetup.create_default(enable_signature_key=True)
         # override defaults for faster tests
         dks.ops = nacl.pwhash.argon2i.OPSLIMIT_MIN
         dks.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
@@ -186,82 +191,147 @@ class TestDerivedKeySetup:
         password_2 = b'supersecret_2'
         derived_keys = dks.generate_keys(password_1)
         derived_keys_1b = derived_keys.setup.generate_keys(password_1)
-        assert derived_keys.enc_key == derived_keys_1b.enc_key
-        assert derived_keys.sign_key == derived_keys_1b.sign_key
+        assert derived_keys.key_enc == derived_keys_1b.key_enc
+        assert derived_keys.key_sign == derived_keys_1b.key_sign
         assert derived_keys.setup.to_dict() == derived_keys_1b.setup.to_dict()
         assert dks.to_dict() == derived_keys.setup.to_dict()
         derived_keys_2 = dks.generate_keys(password_2)
         assert derived_keys_2.setup.to_dict() == dks.to_dict()
-        assert derived_keys_2.enc_key != derived_keys.enc_key
-        assert derived_keys_2.sign_key != derived_keys.sign_key
-        assert derived_keys.enc_key != derived_keys.sign_key
+        assert derived_keys_2.key_enc != derived_keys.key_enc
+        assert derived_keys_2.key_sign != derived_keys.key_sign
+        assert derived_keys.key_enc != derived_keys.key_sign
         # create with a different salt
-        dks2 = core.DerivedKeySetup.create_default(enable_signature_key=False)
+        dks2 = core.KeyDerivationSetup.create_default(enable_signature_key=False)
         # override defaults for faster tests
         dks2.ops = nacl.pwhash.argon2i.OPSLIMIT_MIN
         dks2.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
-        assert dks2.generate_keys(password_1).enc_key != derived_keys.enc_key
+        assert dks2.generate_keys(password_1).key_enc != derived_keys.key_enc
         # serialize and deserialize
-        dks3 = core.DerivedKeySetup.from_dict(derived_keys.setup.to_dict())
-        assert dks3.generate_keys(password_1).enc_key == derived_keys.enc_key
+        dks3 = core.KeyDerivationSetup.from_dict(derived_keys.setup.to_dict())
+        assert dks3.generate_keys(password_1).key_enc == derived_keys.key_enc
 
 
 class TestCryptoHandler:
 
     def test_init(self):
-        pass
-        # ToDo
+        # no signature key
+        enc_key = core.EncryptionKey.create_random(enable_signature_key=False)
+        handler = core.CryptoHandler(key_enc=enc_key.key_enc, key_sign=enc_key.key_sign)
+        assert handler.key_enc == enc_key.key_enc
+        assert handler.key_sign is None
+        handler = core.CryptoHandler.from_encryption_key(enc_key)
+        assert handler.key_enc == enc_key.key_enc
+        assert handler.key_sign is None
+        # with signature key
+        enc_key = core.EncryptionKey.create_random(enable_signature_key=True)
+        handler = core.CryptoHandler(key_enc=enc_key.key_enc, key_sign=enc_key.key_sign)
+        assert handler.key_enc == enc_key.key_enc
+        assert handler.key_sign == enc_key.key_sign
+        handler = core.CryptoHandler.from_encryption_key(enc_key)
+        assert handler.key_enc == enc_key.key_enc
+        assert handler.key_sign == enc_key.key_sign
 
-# @pytest.fixture(scope='module')
-# def encrypt_file_path():
-#     # create file to encrypt
-#     path_to_encrypt = _touch()
-#     with open(path_to_encrypt, 'w') as f_out:
-#         f_out.write('The cake is a lie!\n' * 10000)
-#     # generate a keypair
-#     asym_key = rsa.generate_private_key(
-#         backend=default_backend(),
-#         public_exponent=65537,
-#         key_size=2048
-#     )
-#     path_private_key = _touch()
-#     with open(path_private_key, 'wb') as f_out:
-#         f_out.write(
-#             asym_key.private_bytes(
-#                 serialization.Encoding.PEM,
-#                 serialization.PrivateFormat.PKCS8,
-#                 serialization.NoEncryption()
-#             )
-#         )
-#     path_public_key = _touch()
-#     with open(path_public_key, 'wb') as f_out:
-#         f_out.write(
-#             asym_key.public_key().public_bytes(
-#                 serialization.Encoding.OpenSSH,
-#                 serialization.PublicFormat.OpenSSH
-#             )
-#         )
-#     return path_private_key, path_public_key, path_to_encrypt
-#
-#
-# @pytest.fixture(scope='module')
-# def _keypair():
-#     # create temporary file and close
-#     def _touch():
-#         fd, path = tempfile.mkstemp()
-#         os.close(fd)
-#         return path
-#
-#
-#
-# @pytest.fixture(scope='module')
-# def keypair():
-#
-# class MyTestCase(unittest.TestCase):
-#     def test_something(self):
-#         self.assertEqual(True, False)
-#
-#
-# if __name__ == '__main__':
-#     unittest.main()
-# #
+    def test_de_encrypt(self, buffer_a, content_a):
+        # no signature key
+        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        for chunk in handler.encrypt_stream(buffer_a):
+            buffer_out.write(chunk)
+        buffer_out.seek(0)
+        assert b''.join(handler.decrypt_stream(buffer_out)) == content_a
+        assert handler.signature is None
+        # use signature key
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        for chunk in handler.encrypt_stream(buffer_a):
+            buffer_out.write(chunk)
+        buffer_out.seek(0)
+        assert b''.join(handler.decrypt_stream(buffer_out)) == content_a
+        assert handler.signature is None
+        # create signature
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a):
+                buffer_out.write(chunk)
+        buffer_out.seek(0)
+        assert b''.join(handler.decrypt_stream(buffer_out)) == content_a
+        assert handler.signature is None
+
+    def test_signature(self, buffer_a, content_a):
+        # no signature key
+        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a):
+                buffer_out.write(chunk)
+        signature = handler.signature
+        assert signature is None
+        # use signature key
+        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=True))
+        buffer_a.seek(0)
+        buffer_out_1 = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a):
+                buffer_out_1.write(chunk)
+        signature_1 = handler.signature
+        assert signature_1 is not None
+        buffer_a.seek(0)
+        buffer_out_2 = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a, read_total=SIZE_BUFFER_A - 100):
+                buffer_out_2.write(chunk)
+        signature_2 = handler.signature
+        assert signature_2 is not None
+        assert signature_1 != signature_2
+        with handler.verify_signature(signature_1):
+            buffer_out_1.seek(0)
+            decrypted_1 = b''.join(handler.decrypt_stream(buffer_out_1))
+        assert decrypted_1 == content_a
+        with handler.verify_signature(signature_2):
+            buffer_out_2.seek(0)
+            decrypted_2 = b''.join(handler.decrypt_stream(buffer_out_2))
+        assert decrypted_2 == content_a[:SIZE_BUFFER_A - 100]
+        with pytest.raises(InvalidSignature):
+            # wrong signature
+            with handler.verify_signature(signature_1):
+                buffer_out_2.seek(0)
+                b''.join(handler.decrypt_stream(buffer_out_2))
+
+    def test_decrypt_info(self, content_a, buffer_a, path_asym_keys):
+        privkey = core.AsymKey.privkey_from_pemfile(path_asym_keys[0])
+        pubkey = core.AsymKey.from_pubkey_file(path_asym_keys[1])
+        # no signature key
+        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a):
+                buffer_out.write(chunk)
+        decrypt_info = handler.to_decrypt_info(pubkey)
+        buffer_out.seek(0)
+        with handler.decryptor_from_info(decrypt_info, privkey) as handler_decrypt:
+            assert b''.join(handler_decrypt.decrypt_stream(buffer_out)) == content_a
+        # with signature key, same usage, automatic checks
+        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=True))
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a):
+                buffer_out.write(chunk)
+        decrypt_info = handler.to_decrypt_info(pubkey)
+        buffer_out.seek(0)
+        with handler.decryptor_from_info(decrypt_info, privkey) as handler_decrypt:
+            assert b''.join(handler_decrypt.decrypt_stream(buffer_out)) == content_a
+        # wrong signature
+        buffer_a.seek(0)
+        buffer_out = BytesIO()
+        with handler.create_signature():
+            for chunk in handler.encrypt_stream(buffer_a, read_total=SIZE_BUFFER_A - 100):
+                buffer_out.write(chunk)
+        with pytest.raises(InvalidSignature):
+            buffer_out.seek(0)
+            with handler.decryptor_from_info(decrypt_info, privkey) as handler_decrypt:
+                assert b''.join(handler_decrypt.decrypt_stream(buffer_out)) == content_a[:SIZE_BUFFER_A - 100]
