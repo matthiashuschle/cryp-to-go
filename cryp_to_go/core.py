@@ -19,21 +19,6 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.exceptions import InvalidSignature
 
 CHUNK_SIZE = 16 * 1024
-
-
-class EncryptionKey:
-
-    def __init__(self, key_enc: bytes, key_sign: bytes, setup: "KeyDerivationSetup" = None):
-        """ Handle encryption/signature keys and derivation setup. """
-        self.key_enc = key_enc
-        self.key_sign = key_sign
-        self.setup = setup
-
-    @classmethod
-    def create_random(cls, enable_signature_key: bool = False) -> "EncryptionKey":
-        key_enc = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
-        key_sign = nacl.utils.random(size=64) if enable_signature_key else None
-        return cls(key_enc, key_sign)
         
 
 class AsymKey:
@@ -126,102 +111,6 @@ class AsymKey:
             )
 
 
-class KeyDerivationSetup:
-    
-    def __init__(
-            self,
-            construct: str,
-            ops: int,
-            mem: int,
-            key_size_enc: int,
-            salt_key_enc: bytes,
-            key_size_sig: int,
-            salt_key_sig: bytes,
-    ):
-        self.construct = construct
-        self.ops = ops
-        self.mem = mem
-        self.key_size_enc = key_size_enc
-        self.key_size_sig = key_size_sig
-        self.salt_key_enc = salt_key_enc
-        self.salt_key_sig = salt_key_sig
-
-    def to_dict(self) -> dict:
-        return {
-            'construct': self.construct,
-            'ops': self.ops,
-            'mem': self.mem,
-            'key_size_enc': self.key_size_enc,
-            'key_size_sig': self.key_size_sig,
-            'salt_key_enc': binascii.hexlify(self.salt_key_enc).decode(),
-            'salt_key_sig': binascii.hexlify(self.salt_key_sig).decode(),
-        }
-
-    @classmethod
-    def from_dict(cls, serialized: dict) -> "KeyDerivationSetup":
-        return cls(
-            construct=serialized['construct'],
-            ops=serialized['ops'],
-            mem=serialized['mem'],
-            key_size_enc=serialized['key_size_enc'],
-            key_size_sig=serialized['key_size_sig'],
-            salt_key_enc=binascii.unhexlify(serialized['salt_key_enc'].encode()),
-            salt_key_sig=binascii.unhexlify(serialized['salt_key_sig'].encode()),
-        )
-
-    def copy(self) -> "KeyDerivationSetup":
-        return KeyDerivationSetup.from_dict(self.to_dict())
-
-    @classmethod
-    def create_default(cls, enable_signature_key: bool = False) -> "KeyDerivationSetup":
-        """ Create default settings for encryption key derivation from password.
-
-        original source:
-        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
-
-        :param bool enable_signature_key: generate a key for full data signatures via HMAC.
-            Usually not necessary, as each block is automatically signed. The only danger
-            is block loss and block order manipulation. Key generation is not free
-            (that's the idea), so it depends on your use case, whether it hurts usability.
-
-        :rtype: KeyDerivationSetup
-        """
-        return cls(
-            ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
-            mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
-            construct='argon2i',
-            salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
-            salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES)
-            if enable_signature_key else b'',
-            key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
-            key_size_sig=64 if enable_signature_key else 0
-        )
-    
-    def generate_keys(self, password: bytes) -> EncryptionKey:
-        """ Create encryption and signature keys from a password.
-
-        Uses salt and resilient hashing. Returns the hashing settings, so the keys can be
-        recreated with the same password.
-
-        original source:
-        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
-
-        :param bytes password: password as bytestring
-        :rtype: DerivedKey
-        """
-        kdf = None
-        if self.construct == 'argon2i':
-            kdf = nacl.pwhash.argon2i.kdf
-        if kdf is None:
-            raise AttributeError('construct %s is not implemented' % self.construct)
-        key_enc = kdf(self.key_size_enc, password, self.salt_key_enc,
-                      opslimit=self.ops, memlimit=self.mem)
-        key_sign = kdf(self.key_size_sig, password, self.salt_key_sig,
-                       opslimit=self.ops, memlimit=self.mem) if self.key_size_sig else b''
-        # set setup to a copy of self
-        return EncryptionKey(key_enc, key_sign, setup=self.copy())
-
-
 class CryptoHandler:
 
     def __init__(self, key_enc: bytes, key_sign: Union[None, bytes] = None):
@@ -292,8 +181,10 @@ class CryptoHandler:
         return self._signature
 
     @classmethod
-    def from_encryption_key(cls, encryption_key: EncryptionKey) -> "CryptoHandler":
-        return cls(encryption_key.key_enc, encryption_key.key_sign)
+    def create_random(cls, enable_signature_key: bool = False) -> "CryptoHandler":
+        key_enc = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+        key_sign = nacl.utils.random(size=64) if enable_signature_key else None
+        return cls(key_enc, key_sign)
 
     @contextmanager
     def create_signature(self):
@@ -374,6 +265,101 @@ class CryptoHandler:
         inst = cls(key_enc=info['key_enc'], key_sign=info.get('key_sign'))
         with inst.verify_signature(info.get('signature')):
             yield inst
+
+
+class KeyDerivationSetup:
+
+    def __init__(
+            self,
+            construct: str,
+            ops: int,
+            mem: int,
+            key_size_enc: int,
+            salt_key_enc: bytes,
+            key_size_sig: int,
+            salt_key_sig: bytes,
+    ):
+        self.construct = construct
+        self.ops = ops
+        self.mem = mem
+        self.key_size_enc = key_size_enc
+        self.key_size_sig = key_size_sig
+        self.salt_key_enc = salt_key_enc
+        self.salt_key_sig = salt_key_sig
+
+    def to_dict(self) -> dict:
+        return {
+            'construct': self.construct,
+            'ops': self.ops,
+            'mem': self.mem,
+            'key_size_enc': self.key_size_enc,
+            'key_size_sig': self.key_size_sig,
+            'salt_key_enc': binascii.hexlify(self.salt_key_enc).decode(),
+            'salt_key_sig': binascii.hexlify(self.salt_key_sig).decode(),
+        }
+
+    @classmethod
+    def from_dict(cls, serialized: dict) -> "KeyDerivationSetup":
+        return cls(
+            construct=serialized['construct'],
+            ops=serialized['ops'],
+            mem=serialized['mem'],
+            key_size_enc=serialized['key_size_enc'],
+            key_size_sig=serialized['key_size_sig'],
+            salt_key_enc=binascii.unhexlify(serialized['salt_key_enc'].encode()),
+            salt_key_sig=binascii.unhexlify(serialized['salt_key_sig'].encode()),
+        )
+
+    def copy(self) -> "KeyDerivationSetup":
+        return KeyDerivationSetup.from_dict(self.to_dict())
+
+    @classmethod
+    def create_default(cls, enable_signature_key: bool = False) -> "KeyDerivationSetup":
+        """ Create default settings for encryption key derivation from password.
+
+        original source:
+        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+
+        :param bool enable_signature_key: generate a key for full data signatures via HMAC.
+            Usually not necessary, as each block is automatically signed. The only danger
+            is block loss and block order manipulation. Key generation is not free
+            (that's the idea), so it depends on your use case, whether it hurts usability.
+
+        :rtype: KeyDerivationSetup
+        """
+        return cls(
+            ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
+            mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
+            construct='argon2i',
+            salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
+            salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES)
+            if enable_signature_key else b'',
+            key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
+            key_size_sig=64 if enable_signature_key else 0
+        )
+
+    def generate_keys(self, password: bytes) -> CryptoHandler:
+        """ Create encryption and signature keys from a password.
+
+        Uses salt and resilient hashing. Returns the hashing settings, so the keys can be
+        recreated with the same password.
+
+        original source:
+        https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+
+        :param bytes password: password as bytestring
+        :rtype: DerivedKey
+        """
+        kdf = None
+        if self.construct == 'argon2i':
+            kdf = nacl.pwhash.argon2i.kdf
+        if kdf is None:
+            raise AttributeError('construct %s is not implemented' % self.construct)
+        key_enc = kdf(self.key_size_enc, password, self.salt_key_enc,
+                      opslimit=self.ops, memlimit=self.mem)
+        key_sign = kdf(self.key_size_sig, password, self.salt_key_sig,
+                       opslimit=self.ops, memlimit=self.mem) if self.key_size_sig else None
+        return CryptoHandler(key_enc, key_sign)
 
 
 def get_unenc_block_size(enc_block_size):

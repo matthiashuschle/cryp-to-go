@@ -1,7 +1,7 @@
 import binascii
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from cryp_to_go import AsymKey, CryptoHandler, KeyDerivationSetup, EncryptionKey
+from cryp_to_go import AsymKey, CryptoHandler, KeyDerivationSetup
 from cryp_to_go.core import hexlify, unhexlify
 
 
@@ -17,7 +17,7 @@ def demo_asym():
     # encrypt, using generated symmetric keys and public key
     pubkey = AsymKey.from_pubkey_file(path_public_key)
     # signature key is optional
-    handler = CryptoHandler.from_encryption_key(EncryptionKey.create_random(enable_signature_key=True))
+    handler = CryptoHandler.create_random(enable_signature_key=True)
     with open(path_to_encrypt + '.enc', 'wb+') as f_out:
         with open(path_to_encrypt, 'rb') as f_in:
             with handler.create_signature():
@@ -97,7 +97,7 @@ def demo_sym():
     password = "supersecret".encode()
     # enable_signature_key is optional
     key_setup = KeyDerivationSetup.create_default(enable_signature_key=True)
-    handler = CryptoHandler.from_encryption_key(key_setup.generate_keys(password))
+    handler = key_setup.generate_keys(password)
     with open(path_to_encrypt + '.enc', 'wb+') as f_out:
         with open(path_to_encrypt, 'rb') as f_in:
             with handler.create_signature():
@@ -112,9 +112,7 @@ def demo_sym():
     del handler
     del key_setup
     # decrypt
-    handler = CryptoHandler.from_encryption_key(
-        KeyDerivationSetup.from_dict(key_setup_dict).generate_keys(password)
-    )
+    handler = KeyDerivationSetup.from_dict(key_setup_dict).generate_keys(password)
     # use BytesIO instead of yet another file
     buffer = BytesIO()
     with open(path_to_encrypt + '.enc', 'rb') as f_in:

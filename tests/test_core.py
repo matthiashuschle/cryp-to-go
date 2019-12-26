@@ -93,9 +93,7 @@ def test_sign_verify(content_a, buffer_a):
     content, buffer = content_a, buffer_a
     # succeed unlimited read
     buffer.seek(0)
-    key_sign = core.CryptoHandler.from_encryption_key(
-        core.EncryptionKey.create_random(enable_signature_key=True)
-    ).key_sign
+    key_sign = core.CryptoHandler.create_random(enable_signature_key=True).key_sign
     signature = core.sign_stream(key_sign, buffer)
     buffer.seek(0)
     core.verify_stream(key_sign, buffer, signature)
@@ -104,9 +102,7 @@ def test_sign_verify(content_a, buffer_a):
     assert signature == core.sign_stream(key_sign, buffer)
     # try different sign key
     buffer.seek(0)
-    sign_key_2 = core.CryptoHandler.from_encryption_key(
-        core.EncryptionKey.create_random(enable_signature_key=True)
-    ).key_sign
+    sign_key_2 = core.CryptoHandler.create_random(enable_signature_key=True).key_sign
     signature_2 = core.sign_stream(sign_key_2, buffer)
     assert signature_2 != signature
     # use wrong signature
@@ -190,13 +186,11 @@ class TestDerivedKeySetup:
         password_1 = b'supersecret_1'
         password_2 = b'supersecret_2'
         derived_keys = dks.generate_keys(password_1)
-        derived_keys_1b = derived_keys.setup.generate_keys(password_1)
+        derived_keys_1b = dks.generate_keys(password_1)
         assert derived_keys.key_enc == derived_keys_1b.key_enc
         assert derived_keys.key_sign == derived_keys_1b.key_sign
-        assert derived_keys.setup.to_dict() == derived_keys_1b.setup.to_dict()
-        assert dks.to_dict() == derived_keys.setup.to_dict()
+        assert dks.to_dict() == core.KeyDerivationSetup.from_dict(dks.to_dict()).to_dict()
         derived_keys_2 = dks.generate_keys(password_2)
-        assert derived_keys_2.setup.to_dict() == dks.to_dict()
         assert derived_keys_2.key_enc != derived_keys.key_enc
         assert derived_keys_2.key_sign != derived_keys.key_sign
         assert derived_keys.key_enc != derived_keys.key_sign
@@ -207,7 +201,7 @@ class TestDerivedKeySetup:
         dks2.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
         assert dks2.generate_keys(password_1).key_enc != derived_keys.key_enc
         # serialize and deserialize
-        dks3 = core.KeyDerivationSetup.from_dict(derived_keys.setup.to_dict())
+        dks3 = core.KeyDerivationSetup.from_dict(dks.to_dict())
         assert dks3.generate_keys(password_1).key_enc == derived_keys.key_enc
 
 
@@ -215,25 +209,20 @@ class TestCryptoHandler:
 
     def test_init(self):
         # no signature key
-        enc_key = core.EncryptionKey.create_random(enable_signature_key=False)
-        handler = core.CryptoHandler(key_enc=enc_key.key_enc, key_sign=enc_key.key_sign)
-        assert handler.key_enc == enc_key.key_enc
-        assert handler.key_sign is None
-        handler = core.CryptoHandler.from_encryption_key(enc_key)
-        assert handler.key_enc == enc_key.key_enc
+        handler = core.CryptoHandler.create_random(enable_signature_key=False)
+        assert len(handler.key_enc)
         assert handler.key_sign is None
         # with signature key
-        enc_key = core.EncryptionKey.create_random(enable_signature_key=True)
-        handler = core.CryptoHandler(key_enc=enc_key.key_enc, key_sign=enc_key.key_sign)
-        assert handler.key_enc == enc_key.key_enc
-        assert handler.key_sign == enc_key.key_sign
-        handler = core.CryptoHandler.from_encryption_key(enc_key)
-        assert handler.key_enc == enc_key.key_enc
-        assert handler.key_sign == enc_key.key_sign
+        handler = core.CryptoHandler.create_random(enable_signature_key=True)
+        assert len(handler.key_enc)
+        assert len(handler.key_sign)
+        handler2 = core.CryptoHandler(handler.key_enc, handler.key_sign)
+        assert handler.key_enc == handler2.key_enc
+        assert handler.key_sign == handler2.key_sign
 
     def test_de_encrypt(self, buffer_a, content_a):
         # no signature key
-        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        handler = core.CryptoHandler.create_random(enable_signature_key=False)
         buffer_a.seek(0)
         buffer_out = BytesIO()
         for chunk in handler.encrypt_stream(buffer_a):
@@ -261,7 +250,7 @@ class TestCryptoHandler:
 
     def test_signature(self, buffer_a, content_a):
         # no signature key
-        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        handler = core.CryptoHandler.create_random(enable_signature_key=False)
         buffer_a.seek(0)
         buffer_out = BytesIO()
         with handler.create_signature():
@@ -270,7 +259,7 @@ class TestCryptoHandler:
         signature = handler.signature
         assert signature is None
         # use signature key
-        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=True))
+        handler = core.CryptoHandler.create_random(enable_signature_key=True)
         buffer_a.seek(0)
         buffer_out_1 = BytesIO()
         with handler.create_signature():
@@ -304,7 +293,7 @@ class TestCryptoHandler:
         privkey = core.AsymKey.privkey_from_pemfile(path_asym_keys[0])
         pubkey = core.AsymKey.from_pubkey_file(path_asym_keys[1])
         # no signature key
-        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=False))
+        handler = core.CryptoHandler.create_random(enable_signature_key=False)
         buffer_a.seek(0)
         buffer_out = BytesIO()
         with handler.create_signature():
@@ -315,7 +304,7 @@ class TestCryptoHandler:
         with handler.decryptor_from_info(decrypt_info, privkey) as handler_decrypt:
             assert b''.join(handler_decrypt.decrypt_stream(buffer_out)) == content_a
         # with signature key, same usage, automatic checks
-        handler = core.CryptoHandler.from_encryption_key(core.EncryptionKey.create_random(enable_signature_key=True))
+        handler = core.CryptoHandler.create_random(enable_signature_key=True)
         buffer_a.seek(0)
         buffer_out = BytesIO()
         with handler.create_signature():
