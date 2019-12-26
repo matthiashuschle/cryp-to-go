@@ -22,8 +22,9 @@ CHUNK_SIZE = 16 * 1024
 
 
 class EncryptionKey:
-    
-    def __init__(self, key_enc, key_sign, setup=None):
+
+    def __init__(self, key_enc: bytes, key_sign: bytes, setup: "KeyDerivationSetup" = None):
+        """ Handle encryption/signature keys and derivation setup. """
         self.key_enc = key_enc
         self.key_sign = key_sign
         self.setup = setup
@@ -59,6 +60,7 @@ class AsymKey:
         )
 
     def encrypt(self, message: bytes) -> bytes:
+        """ Encrypt by public key. """
         enc = self.key.encrypt(
             message,
             self.padding,
@@ -66,6 +68,7 @@ class AsymKey:
         return enc
 
     def decrypt(self, encrypted: bytes) -> bytes:
+        """ Decrypt by private key. """
         original_message = self.key.decrypt(
             encrypted,
             self.padding,

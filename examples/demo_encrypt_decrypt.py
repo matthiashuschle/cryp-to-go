@@ -97,10 +97,7 @@ def demo_sym():
     password = "supersecret".encode()
     # enable_signature_key is optional
     key_setup = KeyDerivationSetup.create_default(enable_signature_key=True)
-    handler = CryptoHandler.from_derived_key_setup(
-        key_setup,
-        password,
-    )
+    handler = CryptoHandler.from_encryption_key(key_setup.generate_keys(password))
     with open(path_to_encrypt + '.enc', 'wb+') as f_out:
         with open(path_to_encrypt, 'rb') as f_in:
             with handler.create_signature():
@@ -115,9 +112,8 @@ def demo_sym():
     del handler
     del key_setup
     # decrypt
-    handler = CryptoHandler.from_derived_key_setup(
-        KeyDerivationSetup.from_dict(key_setup_dict),
-        password,
+    handler = CryptoHandler.from_encryption_key(
+        KeyDerivationSetup.from_dict(key_setup_dict).generate_keys(password)
     )
     # use BytesIO instead of yet another file
     buffer = BytesIO()
