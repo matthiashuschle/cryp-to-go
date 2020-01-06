@@ -4,9 +4,11 @@ Inspired by Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
 import os
-from typing import Union, Dict
+from typing import Union, Dict, Iterator
 from contextlib import contextmanager
 import binascii
+import io
+import random
 import nacl.secret
 import nacl.utils
 import nacl.encoding
@@ -199,7 +201,7 @@ class CryptoHandler:
         if signature:
             self.hmac.verify(signature)
 
-    def encrypt_stream(self, plain_file_object, read_total=None):
+    def encrypt_stream(self, plain_file_object, read_total: Union[int, None] = None) -> Iterator[bytes]:
         """ Here the encryption happens in chunks (generator).
 
         The output size is the CHUNK SIZE, the chunks read are 40 bytes smaller to add nonce and chunk
@@ -221,7 +223,7 @@ class CryptoHandler:
             self.hmac.update(enc)
             yield enc
 
-    def decrypt_stream(self, enc_file_object, read_total=None):
+    def decrypt_stream(self, enc_file_object, read_total: Union[int, None] = None) -> Iterator[bytes]:
         """ Decrypt encrypted stream. (generator)
 
         If auth_key and signature is provided, HMAC verification is done automatically.
@@ -229,11 +231,45 @@ class CryptoHandler:
         :param BytesIO enc_file_object: encrypted data stream
         :param int read_total: maximum bytes to read
         :return: plain data in chunks
-        :rtype: bytes
+        :rtype: Iterator[:class:`bytes`]
         """
         for chunk in _read_in_chunks(enc_file_object, read_total=read_total):
             self.hmac.update(chunk)
             yield self.secret_box.decrypt(chunk)
+
+    def encrypt_snippet(self, content: bytes) -> bytes:
+        """ Convenience method to encrypt small chunks of binary data.
+
+        Wraps encrypt_stream to avoid iterator handling. Not suitable for
+        large data chunks.
+
+        :param bytes content: binary content to encrypt
+        :returns: encrypted content as bytes
+        :rtype: bytes
+        """
+        buffer_in = io.BytesIO(content)
+        buffer_in.seek(0)
+        buffer_out = io.BytesIO()
+        with self.create_signature():
+            for enc_chunk in self.encrypt_stream(buffer_in):
+                buffer_out.write(enc_chunk)
+        return buffer_out.getvalue()
+
+    def decrypt_snippet(self, enc_content: bytes, signature: Union[bytes, None] = None) -> bytes:
+        """ Inverse of encrypt_snippet.
+
+        :param bytes enc_content: binary content to decrypt
+        :param bytes signature: optional signature
+        :returns: encrypted content as bytes
+        :rtype: bytes
+        """
+        buffer_in = io.BytesIO(enc_content)
+        buffer_in.seek(0)
+        buffer_out = io.BytesIO()
+        with self.verify_signature(signature):
+            for chunk in self.decrypt_stream(buffer_in):
+                buffer_out.write(chunk)
+        return buffer_out.getvalue()
 
     def to_decrypt_info(self, public_key) -> Dict[str, Union[None, str]]:
         """ Use public key from asymmetric keypair to encrypt symmetric keys.
@@ -385,17 +421,17 @@ def get_unenc_block_size(enc_block_size):
     return n_chunks * (CHUNK_SIZE - 40)
 
 
-def hexlify(binarray):
+def hexlify(binarray: bytes) -> str:
     """ Binary to hex-string conversion. """
     return binascii.hexlify(binarray).decode()
 
 
-def unhexlify(hexstr):
+def unhexlify(hexstr: str) -> bytes:
     """ Hex-string to binary conversion. """
     return binascii.unhexlify(hexstr.encode())
 
 
-def _get_chunk_nonce(base, index):
+def _get_chunk_nonce(base: bytes, index: int) -> bytes:
     """ Creates incrementing nonces. Make sure that the base is different for each reset of index!
 
     :param bytes base: random base for the nonces
@@ -410,14 +446,18 @@ def _get_chunk_nonce(base, index):
     )
 
 
-def _read_in_chunks(file_object, chunk_size=None, read_total=None):
+def _read_in_chunks(
+        file_object,
+        chunk_size: Union[int, None] = None,
+        read_total: Union[int, None] = None
+) -> Iterator[bytes]:
     """ Generator to read a stream piece by piece with a given chunk size.
     Total read size may be given. Only read() is used on the stream.
 
     :param BytesIO file_object: readable stream
     :param int chunk_size: chunk read size
     :param int read_total: maximum amount to read in total
-    :rtype: tuple
+    :rtype: Iterator[bytes]
     :returns: data as bytes and index as int
     """
     chunk_size = chunk_size or CHUNK_SIZE
@@ -433,7 +473,7 @@ def _read_in_chunks(file_object, chunk_size=None, read_total=None):
         read_yet += read_size
 
 
-def sign_stream(key_sign, enc_file_object, read_total=None):
+def sign_stream(key_sign: bytes, enc_file_object, read_total: Union[int, None] = None) -> bytes:
     """ Sign a stream with a given HMAC handler. Suitable for large amounts of data.
 
     :param bytes key_sign: signing key for HMAC
@@ -474,3 +514,37 @@ def verify_stream(key_sign, enc_file_object, signature, read_total=None):
         return True
     except InvalidSignature:
         return False
+
+
+def inflate_string(string: str, min_len: int = 64, variance: int = 32) -> bytes:
+    """ Extend a string by an arbitrary number of bytes.
+
+    - Actually converts to bytes, adds random stuff and separates by 0 char.
+    - Intended for preventing identification of files by path length.
+    - 0 char is invalid in paths, so should be safe here.
+    - No guarantees for other use cases. Some operations may get confused.
+    """
+    if string.find('\0') >= 0:
+        raise ValueError(r'Zero character is illegal in this operation.')
+    as_bytes = string.encode()
+    final_size = (
+            min_len
+            + ((len(as_bytes) + variance) // min_len) * min_len
+            + random.choice(range(2 * variance + 1)) - variance
+    )
+    n_append = final_size - len(as_bytes)
+    if not n_append:
+        return as_bytes
+    as_bytes += '\0'.encode()
+    return as_bytes + nacl.utils.random(max(0, final_size - len(as_bytes)))
+
+
+def deflate_string(as_bytes: bytes) -> str:
+    """ Inverse of inflate_string.
+
+    Takes the undecoded binary string.
+    """
+    zero_loc = as_bytes.find(0)
+    if zero_loc < 0:
+        return as_bytes.decode()
+    return as_bytes[:zero_loc].decode()

@@ -128,6 +128,28 @@ def _touch_temp_file():
     return path
 
 
+def test_inflate_string():
+    test_str = 'abcdefgh'
+    inflated = core.inflate_string(test_str)
+    assert inflated[:8] == b'abcdefgh'
+    assert inflated[8] == 0
+    assert len(inflated) > 30
+    test_str = 'abcdefgh' * 10
+    inflated = core.inflate_string(test_str)
+    assert inflated[:80] == b'abcdefgh' * 10
+    assert inflated[80] == 0
+    assert len(inflated) > 90
+
+
+def test_deflate_string():
+    test_str = 'abcdefgh'
+    inflated = core.inflate_string(test_str)
+    assert core.deflate_string(inflated) == test_str
+    test_str = 'abcdefgh' * 10
+    inflated = core.inflate_string(test_str)
+    assert core.deflate_string(inflated) == test_str
+
+
 @pytest.fixture()
 def path_asym_keys():
     # generate a keypair
@@ -215,7 +237,7 @@ class TestCryptoHandler:
         # with signature key
         handler = core.CryptoHandler.create_random(enable_signature_key=True)
         assert len(handler.key_enc)
-        assert len(handler.key_sign)
+        assert handler.key_sign is not None and len(handler.key_sign)
         handler2 = core.CryptoHandler(handler.key_enc, handler.key_sign)
         assert handler.key_enc == handler2.key_enc
         assert handler.key_sign == handler2.key_sign
@@ -324,3 +346,18 @@ class TestCryptoHandler:
             buffer_out.seek(0)
             with handler.decryptor_from_info(decrypt_info, privkey) as handler_decrypt:
                 assert b''.join(handler_decrypt.decrypt_stream(buffer_out)) == content_a[:SIZE_BUFFER_A - 100]
+
+    def test_de_encrypt_snippets(self, buffer_a, content_a):
+        handler = core.CryptoHandler.create_random(enable_signature_key=False)
+        assert handler.decrypt_snippet(handler.encrypt_snippet(content_a)) == content_a
+        assert handler.signature is None
+        # use signature key
+        handler = core.CryptoHandler.create_random(enable_signature_key=True)
+        enc = handler.encrypt_snippet(content_a)
+        signature = handler.signature
+        assert signature is not None
+        assert handler.decrypt_snippet(enc, signature=signature) == content_a
+        # wrong signature - re-encrypting uses different nonces
+        enc_anew = handler.encrypt_snippet(content_a)
+        with pytest.raises(InvalidSignature):
+            handler.decrypt_snippet(enc_anew, signature=signature)
