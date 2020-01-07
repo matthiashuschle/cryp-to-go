@@ -25,6 +25,7 @@ class Files(pw.Model):
     file_id = pw.AutoField()
     path = pw.TextField()
     encrypted_file_path = pw.TextField(null=True)
+    n_chunks = pw.IntegerField(default=-1)
 
 
 class Chunks(pw.Model):
