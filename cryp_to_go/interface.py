@@ -28,7 +28,7 @@ class SQLiteFileInterface:
                 )
 
     def load_crypto_handler(self, password):
-        with self.sql_handler.open_db() as db:
+        with self.sql_handler.open_db():
             kds = KeyDerivationSetup.from_dict(
                 json.loads(Settings.get(Settings.key == _KEY_DERIVATION_SETUP).value)
             )
@@ -110,5 +110,40 @@ class SQLiteFileInterface:
                     file_entry.save()
             return file_entry.file_id
 
+    def read_file_index(self):
+        files = []
+        with self.sql_handler.open_db():
+            for row in Files.select(Files.file_id, Files.path, Files.encrypted_file_path):
+                assert isinstance(row, Files)
+                row_dict = row.to_dict()
+                row_dict['path'] = deflate_string(self.crypto_handler.decrypt_snippet(row.path))
+                files.append(row)
+        return files
 
+    def get_file_ids(self, file_list):
+        file_index = self.read_file_index()
+        return {file['path']: file['file_id'] for file in file_index if file['path'] in file_list}
 
+    def restore_files(self, file_list):
+        file_index = self.get_file_ids(file_list)
+        for file_id in file_index:
+            self.restore_single_file(file_id)
+
+    def restore_single_file(self, file_id, signature=None):
+        with self.sql_handler.open_db():
+            file = Files.get_by_id(file_id)
+            assert isinstance(file, Files)
+            target_path = deflate_string(self.crypto_handler.decrypt_snippet(file.path))
+            with open(target_path, 'wb') as f_out:
+                with self.crypto_handler.verify_signature(signature):
+                    if file.encrypted_file_path:
+                        with open(file.encrypted_file_path, 'rb') as f_in:
+                            for chunk in self.crypto_handler.decrypt_stream(f_in):
+                                f_out.write(chunk)
+                    else:
+                        for row in Chunks\
+                                .select(Chunks.content)\
+                                .where(Chunks.fk_file_id == file_id)\
+                                .order_by(Chunks.i_chunk):
+                            f_out.write(self.crypto_handler.decrypt_chunk(row.content))
+        return target_path

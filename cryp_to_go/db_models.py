@@ -27,8 +27,16 @@ class Files(pw.Model):
     encrypted_file_path = pw.TextField(null=True)
     n_chunks = pw.IntegerField(default=-1)
 
+    def to_dict(self):
+        return {
+            'file_id': self.file_id,
+            'path': self.path,
+            'encrypted_file_path': self.encrypted_file_path,
+            'n_chunks': self.n_chunks,
+        }
+
 
 class Chunks(pw.Model):
-    fk_file_id = pw.ForeignKeyField(Files, field='file_id', backref='chunks')
+    fk_file_id = pw.ForeignKeyField(Files, field='file_id')
     i_chunk = pw.IntegerField()
     content = pw.BlobField()

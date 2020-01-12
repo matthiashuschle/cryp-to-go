@@ -234,8 +234,16 @@ class CryptoHandler:
         :rtype: Iterator[:class:`bytes`]
         """
         for chunk in _read_in_chunks(enc_file_object, read_total=read_total):
-            self.hmac.update(chunk)
-            yield self.secret_box.decrypt(chunk)
+            yield self.decrypt_chunk(chunk)
+
+    def decrypt_chunk(self, chunk: bytes) -> bytes:
+        """ Decrypt a single encrypted chunk.
+
+        :param bytes chunk: encrypted fixed-size chunk
+        :rtype: bytes
+        """
+        self.hmac.update(chunk)
+        return self.secret_box.decrypt(chunk)
 
     def encrypt_snippet(self, content: bytes) -> bytes:
         """ Convenience method to encrypt small chunks of binary data.
