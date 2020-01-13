@@ -13,11 +13,10 @@ _KEY_DERIVATION_SETUP = 'key_derivation_setup'
 
 class SQLiteFileInterface:
 
-    def __init__(self, sqlite_file: str, crypto_handler: Union[None, CryptoHandler] = None,
-                 generate_signatures: bool = False):
+    def __init__(self, sqlite_file: str, crypto_handler: Union[None, CryptoHandler] = None):
         self.sql_handler = SQLiteHandler(sqlite_file)
         self.crypto_handler = crypto_handler
-        self.generate_signatures = generate_signatures
+        self._key_derivation_factory = KeyDerivationSetup.create_default
 
     def store_key_derivation_setup(self, kds: KeyDerivationSetup):
         with self.sql_handler.open_db() as database:
@@ -34,14 +33,14 @@ class SQLiteFileInterface:
             )
         self.crypto_handler = kds.generate_keys(password)
 
-    def use_new_crypto_handler(self, password):
-        kds = KeyDerivationSetup.create_default(enable_signature_key=self.generate_signatures)
+    def use_new_crypto_handler(self, password, use_signatures=False):
+        kds = self._key_derivation_factory(enable_signature_key=use_signatures)
         self.store_key_derivation_setup(kds)
         self.crypto_handler = kds.generate_keys(password)
 
     def assert_crypto_handler(self):
         if self.crypto_handler is None:
-            raise RuntimeError('crypto_handler must be set for this opration. '
+            raise RuntimeError('crypto_handler must be set for this operation. '
                                'Set in constructor, manually, or per load_crypto_handler '
                                'or use_new_crypto_handler.')
 

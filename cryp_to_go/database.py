@@ -15,7 +15,7 @@ class SQLiteHandler:
                 'foreign_keys': 1,
                 'ignore_check_constraints': 0,
                 'synchronous': 0
-            }
+            },
         )
         self._create_tables()
 

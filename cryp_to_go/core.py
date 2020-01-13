@@ -382,6 +382,19 @@ class KeyDerivationSetup:
             key_size_sig=64 if enable_signature_key else 0
         )
 
+    @classmethod
+    def create_minimal(cls, enable_signature_key: bool = False) -> "KeyDerivationSetup":
+        """ Use minimal settings for key derivation.
+
+        Intended for testing purposes only!
+        """
+        inst = cls.create_default(
+            enable_signature_key=enable_signature_key
+        )
+        inst.ops = nacl.pwhash.argon2i.OPSLIMIT_MIN
+        inst.mem = nacl.pwhash.argon2i.MEMLIMIT_MIN
+        return inst
+
     def generate_keys(self, password: bytes) -> CryptoHandler:
         """ Create encryption and signature keys from a password.
 
