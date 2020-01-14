@@ -46,10 +46,14 @@ class SQLiteFileInterface:
 
     def store_files(self, file_list: List[str]) -> Dict[str, Tuple[int, bytes]]:
         cwd = pathlib.PurePath(os.getcwd())
-        relative_paths = [pathlib.PurePath(x).relative_to(cwd) for x in file_list]
-        if any(x.is_dir() for x in relative_paths):
+        paths = [pathlib.Path(x) for x in file_list]
+        if not all(x.exists() for x in paths):
             raise OSError(
-                'target is not a file: ' + repr([x for x in relative_paths if not x.is_dir()]))
+                'missing file: ' + repr([x for x in file_list if not pathlib.Path(x).exists()]))
+        relative_paths = [pathlib.PurePath(x).relative_to(cwd) for x in file_list]
+        if any(x.is_dir() for x in paths):
+            raise OSError(
+                'target is not a file: ' + repr([x for x in paths if x.is_dir()]))
         if any('..' in x.parts for x in relative_paths):
             raise ValueError(
                 '".." not allowed in target path: '
@@ -66,7 +70,7 @@ class SQLiteFileInterface:
         with self.sql_handler.open_db() as db:
             with db.atomic():
                 file_entry = Files.create(
-                    path=self.crypto_handler.encrypt_snippet(inflate_string(file)),
+                    path=self.crypto_handler.encrypt_snippet(inflate_string(str(file))),
                     encrypted_file_path=outfile,
                 )
             with open(file, 'rb') as stream_in:
@@ -74,7 +78,7 @@ class SQLiteFileInterface:
                     yield db, file_entry, stream_in
 
     def _generate_enc_chunks(self, stream_in, file_id):
-        for i_chunk, enc_chunk in self.crypto_handler.encrypt_stream(stream_in):
+        for i_chunk, enc_chunk in enumerate(self.crypto_handler.encrypt_stream(stream_in)):
             yield Chunks(
                 fk_file_id=file_id,
                 i_chunk=i_chunk,
@@ -89,7 +93,7 @@ class SQLiteFileInterface:
             current_chunk.append(element)
             if len(current_chunk) == n:
                 yield current_chunk
-            current_chunk = []
+                current_chunk = []
         if len(current_chunk):
             yield current_chunk
 
@@ -116,7 +120,7 @@ class SQLiteFileInterface:
                 assert isinstance(row, Files)
                 row_dict = row.to_dict()
                 row_dict['path'] = deflate_string(self.crypto_handler.decrypt_snippet(row.path))
-                files.append(row)
+                files.append(row_dict)
         return files
 
     def get_file_ids(self, file_list):
@@ -125,7 +129,7 @@ class SQLiteFileInterface:
 
     def restore_files(self, file_list):
         file_index = self.get_file_ids(file_list)
-        for file_id in file_index:
+        for file_id in file_index.values():
             self.restore_single_file(file_id)
 
     def restore_single_file(self, file_id, signature=None):
@@ -133,6 +137,9 @@ class SQLiteFileInterface:
             file = Files.get_by_id(file_id)
             assert isinstance(file, Files)
             target_path = deflate_string(self.crypto_handler.decrypt_snippet(file.path))
+            dirname = os.path.dirname(target_path)
+            if len(dirname):
+                os.makedirs(dirname, exist_ok=True)
             with open(target_path, 'wb') as f_out:
                 with self.crypto_handler.verify_signature(signature):
                     if file.encrypted_file_path:

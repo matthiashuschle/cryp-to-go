@@ -23,7 +23,7 @@ class Settings(pw.Model):
 
 class Files(pw.Model):
     file_id = pw.AutoField()
-    path = pw.TextField()
+    path = pw.BlobField()
     encrypted_file_path = pw.TextField(null=True)
     n_chunks = pw.IntegerField(default=-1)
 
