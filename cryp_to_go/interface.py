@@ -5,10 +5,16 @@ from contextlib import contextmanager
 from typing import Union, List, Tuple, Dict
 from .database import SQLiteHandler
 from .db_models import Settings, Files, Chunks
-from .core import KeyDerivationSetup, inflate_string, deflate_string, CryptoHandler
-
+from .core import (
+    KeyDerivationSetup,
+    inflate_string,
+    deflate_string,
+    CryptoHandler,
+    AsymKey,
+)
 
 _KEY_DERIVATION_SETUP = 'key_derivation_setup'
+_KEY_DECRYPT_INFO_ASYM = 'decrypt_info_asym'
 
 
 class SQLiteFileInterface:
@@ -25,6 +31,19 @@ class SQLiteFileInterface:
                     key=_KEY_DERIVATION_SETUP,
                     value=json.dumps(kds.to_dict())
                 )
+
+    def store_keys_asymmetric(self, pubkey: AsymKey):
+        with self.sql_handler.open_db() as database:
+            with database.atomic():
+                Settings.create(
+                    key=_KEY_DECRYPT_INFO_ASYM,
+                    value=self.crypto_handler.to_decrypt_info(pubkey, skip_signature=True),
+                )
+
+    def load_crypto_handler_async(self, privkey: AsymKey):
+        with self.sql_handler.open_db():
+            decrypt_info = Settings.get(Settings.key == _KEY_DERIVATION_SETUP).value
+        self.crypto_handler = CryptoHandler.from_info(decrypt_info, privkey)
 
     def load_crypto_handler(self, password):
         with self.sql_handler.open_db():

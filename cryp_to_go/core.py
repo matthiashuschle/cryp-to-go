@@ -279,18 +279,19 @@ class CryptoHandler:
                 buffer_out.write(chunk)
         return buffer_out.getvalue()
 
-    def to_decrypt_info(self, public_key) -> Dict[str, Union[None, str]]:
+    def to_decrypt_info(self, public_key, skip_signature=False) -> Dict[str, Union[None, str]]:
         """ Use public key from asymmetric keypair to encrypt symmetric keys.
 
         Generates hexlified strings, so it's JSONifiable.
 
         :param AsymKey public_key: cryptography SSL RSA key (from pair) or similar, see AsymKey
+        :param bool skip_signature: ignore current encryption signature
         :returns: Dict[str, Union[None, str]]
         """
         info = {
             'key_enc': self.key_enc,
             'key_sign': self.key_sign,
-            'signature': self.signature,
+            'signature': None if skip_signature else self.signature,
         }
         info_enc = {}
         for key, val in info.items():
@@ -299,16 +300,27 @@ class CryptoHandler:
             info_enc[key] = hexlify(public_key.encrypt(val))
         return info_enc
 
-    @classmethod
-    @contextmanager
-    def decryptor_from_info(cls, decrypt_info, private_key):
+    @staticmethod
+    def decode_info(decrypt_info, private_key):
         info = {
             key: private_key.decrypt(unhexlify(val))
             for key, val in decrypt_info.items()
         }
+        return info
+
+    @classmethod
+    @contextmanager
+    def decryptor_from_info(cls, decrypt_info, private_key):
+        info = cls.decode_info(decrypt_info, private_key)
         inst = cls(key_enc=info['key_enc'], key_sign=info.get('key_sign'))
         with inst.verify_signature(info.get('signature')):
             yield inst
+
+    @classmethod
+    def from_info(cls, decrypt_info, private_key):
+        info = cls.decode_info(decrypt_info, private_key)
+        inst = cls(key_enc=info['key_enc'], key_sign=info.get('key_sign'))
+        return inst
 
 
 class KeyDerivationSetup:
