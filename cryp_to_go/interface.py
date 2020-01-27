@@ -1,6 +1,7 @@
 import os
 import pathlib
 import json
+from io import BytesIO
 from contextlib import contextmanager
 from typing import Union, List, Tuple, Dict
 from .database import SQLiteHandler
@@ -63,6 +64,13 @@ class SQLiteFileInterface:
                                'Set in constructor, manually, or per load_crypto_handler '
                                'or use_new_crypto_handler.')
 
+    def store_values(self, value_dict: Dict[str, bytes]) -> Dict[str, Tuple[int, bytes]]:
+        enc_info = {}
+        for key, value in value_dict.items():
+            file_id = self.store_single_value(key, value)
+            enc_info[key] = (file_id, self.crypto_handler.signature)
+        return enc_info
+
     def store_files(self, file_list: List[str]) -> Dict[str, Tuple[int, bytes]]:
         cwd = pathlib.PurePath(os.getcwd())
         paths = [pathlib.Path(x) for x in file_list]
@@ -116,6 +124,28 @@ class SQLiteFileInterface:
         if len(current_chunk):
             yield current_chunk
 
+    def store_single_value(self, key: str, value: bytes):
+        with self.sql_handler.open_db() as db:
+            with db.atomic():
+                file_entry = Files.create(
+                    path=self.crypto_handler.encrypt_snippet(inflate_string(str(key))),
+                    is_physical_file=False,
+                )
+            stream = BytesIO(value)
+            stream.seek(0)
+            with self.crypto_handler.create_signature():
+                self._db_store_enc_stream_in(file_entry, stream, db)
+            return file_entry.file_id
+
+    def _db_store_enc_stream_in(self, file_entry, stream_in, db):
+        n_chunks = 0
+        with db.atomic():
+            for chunk_group in self._chunked(self._generate_enc_chunks(stream_in, file_entry.file_id), 20):
+                Chunks.bulk_create(chunk_group)
+                n_chunks += len(chunk_group)
+            file_entry.n_chunks = n_chunks
+            file_entry.save()
+
     def store_single_file(self, file: str, outfile: Union[str, None] = None):
         with self._reader_encrypt_file(file, outfile) as (db, file_entry, stream_in):
             if outfile:
@@ -123,13 +153,7 @@ class SQLiteFileInterface:
                 for enc_chunk in self.crypto_handler.encrypt_stream(stream_in):
                     stream_out.write(enc_chunk)
             else:
-                n_chunks = 0
-                with db.atomic():
-                    for chunk_group in self._chunked(self._generate_enc_chunks(stream_in, file_entry.file_id), 20):
-                        Chunks.bulk_create(chunk_group)
-                        n_chunks += len(chunk_group)
-                    file_entry.n_chunks = n_chunks
-                    file_entry.save()
+                self._db_store_enc_stream_in(file_entry, stream_in, db)
             return file_entry.file_id
 
     def read_file_index(self):
@@ -155,20 +179,37 @@ class SQLiteFileInterface:
         with self.sql_handler.open_db():
             file = Files.get_by_id(file_id)
             assert isinstance(file, Files)
-            target_path = deflate_string(self.crypto_handler.decrypt_snippet(file.path))
-            dirname = os.path.dirname(target_path)
-            if len(dirname):
-                os.makedirs(dirname, exist_ok=True)
-            with open(target_path, 'wb') as f_out:
-                with self.crypto_handler.verify_signature(signature):
-                    if file.encrypted_file_path:
-                        with open(file.encrypted_file_path, 'rb') as f_in:
-                            for chunk in self.crypto_handler.decrypt_stream(f_in):
-                                f_out.write(chunk)
-                    else:
-                        for row in Chunks\
-                                .select(Chunks.content)\
-                                .where(Chunks.fk_file_id == file_id)\
-                                .order_by(Chunks.i_chunk):
-                            f_out.write(self.crypto_handler.decrypt_chunk(row.content))
+            if file.is_physical_file:
+                return self._restore_single_file_physical(file, signature)
+            else:
+                return self._restore_single_file_virtual(file, signature)
+
+    def _restore_single_file_physical(self, file: Files, signature):
+        target_path = deflate_string(self.crypto_handler.decrypt_snippet(file.path))
+        dirname = os.path.dirname(target_path)
+        if len(dirname):
+            os.makedirs(dirname, exist_ok=True)
+        with open(target_path, 'wb') as f_out:
+            with self.crypto_handler.verify_signature(signature):
+                if file.encrypted_file_path:
+                    with open(file.encrypted_file_path, 'rb') as f_in:
+                        for chunk in self.crypto_handler.decrypt_stream(f_in):
+                            f_out.write(chunk)
+                else:
+                    for row in self._iter_file_chunks(file):
+                        f_out.write(self.crypto_handler.decrypt_chunk(row.content))
         return target_path
+
+    @staticmethod
+    def _iter_file_chunks(file):
+        yield from Chunks \
+                .select(Chunks.content) \
+                .where(Chunks.fk_file_id == file.file_id) \
+                .order_by(Chunks.i_chunk)
+
+    def _restore_single_file_virtual(self, file: Files, signature):
+        buffer = BytesIO()
+        with self.crypto_handler.verify_signature(signature):
+            for row in self._iter_file_chunks(file):
+                buffer.write(self.crypto_handler.decrypt_chunk(row.content))
+        return buffer.getvalue()

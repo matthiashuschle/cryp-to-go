@@ -26,6 +26,7 @@ class Files(pw.Model):
     path = pw.BlobField()
     encrypted_file_path = pw.TextField(null=True)
     n_chunks = pw.IntegerField(default=-1)
+    is_physical_file = pw.BooleanField(default=True)
 
     def to_dict(self):
         return {
@@ -33,6 +34,7 @@ class Files(pw.Model):
             'path': self.path,
             'encrypted_file_path': self.encrypted_file_path,
             'n_chunks': self.n_chunks,
+            'is_physical_file': self.is_physical_file
         }
 
 
