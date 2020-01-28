@@ -42,8 +42,9 @@ class SQLiteFileInterface:
                 )
 
     def load_crypto_handler_async(self, privkey: AsymKey):
+        # ToDo: incomplete, needs tests, allow multiple keypairs
         with self.sql_handler.open_db():
-            decrypt_info = Settings.get(Settings.key == _KEY_DERIVATION_SETUP).value
+            decrypt_info = Settings.get(Settings.key == _KEY_DECRYPT_INFO_ASYM).value
         self.crypto_handler = CryptoHandler.from_info(decrypt_info, privkey)
 
     def load_crypto_handler(self, password):
@@ -64,10 +65,10 @@ class SQLiteFileInterface:
                                'Set in constructor, manually, or per load_crypto_handler '
                                'or use_new_crypto_handler.')
 
-    def store_values(self, value_dict: Dict[str, bytes]) -> Dict[str, Tuple[int, bytes]]:
+    def store_values(self, value_dict: Dict[str, bytes], replace: bool = False) -> Dict[str, Tuple[int, bytes]]:
         enc_info = {}
         for key, value in value_dict.items():
-            file_id = self.store_single_value(key, value)
+            file_id = self.store_single_value(key, value, replace=replace)
             enc_info[key] = (file_id, self.crypto_handler.signature)
         return enc_info
 
@@ -124,7 +125,20 @@ class SQLiteFileInterface:
         if len(current_chunk):
             yield current_chunk
 
-    def store_single_value(self, key: str, value: bytes):
+    def drop_file(self, file_id: int):
+        with self.sql_handler.open_db() as db:
+            with db.atomic():
+                Chunks.delete().where(Chunks.fk_file_id == file_id).execute()
+                Files.delete().where(Files.file_id == file_id).execute()
+
+    def store_single_value(self, key: str, value: bytes, replace: bool = False):
+        file_index = self.read_file_index()
+        for file in file_index:
+            if file['path'] == key:
+                if replace:
+                    self.drop_file(file['file_id'])
+                else:
+                    raise RuntimeError('file with key %s already exists.' % key)
         with self.sql_handler.open_db() as db:
             with db.atomic():
                 file_entry = Files.create(
@@ -159,7 +173,7 @@ class SQLiteFileInterface:
     def read_file_index(self):
         files = []
         with self.sql_handler.open_db():
-            for row in Files.select(Files.file_id, Files.path, Files.encrypted_file_path):
+            for row in Files.select():
                 assert isinstance(row, Files)
                 row_dict = row.to_dict()
                 row_dict['path'] = deflate_string(self.crypto_handler.decrypt_snippet(row.path))
@@ -170,12 +184,14 @@ class SQLiteFileInterface:
         file_index = self.read_file_index()
         return {file['path']: file['file_id'] for file in file_index if file['path'] in file_list}
 
-    def restore_files(self, file_list):
+    def restore_files(self, file_list: List[str]) -> Dict[str, Union[str, bytes]]:
         file_index = self.get_file_ids(file_list)
-        for file_id in file_index.values():
-            self.restore_single_file(file_id)
+        result = {}
+        for path, file_id in file_index.items():
+            result[path] = self.restore_single_file(file_id)
+        return result
 
-    def restore_single_file(self, file_id, signature=None):
+    def restore_single_file(self, file_id, signature=None) -> Union[str, bytes]:
         with self.sql_handler.open_db():
             file = Files.get_by_id(file_id)
             assert isinstance(file, Files)

@@ -170,3 +170,33 @@ class TestSQLiteFileInterface:
                 assert f_in.read() == CONTENT * 100
             with open(os.path.join('subdir', 'foo300.dat'), 'r') as f_in:
                 assert f_in.read() == CONTENT * 300
+
+    @pytest.mark.parametrize("use_signatures", [(True,), (False,)])
+    def test_value_storage(self, use_signatures, temp_sqlite_path):
+        crypto_handler = core.CryptoHandler.create_random(enable_signature_key=use_signatures)
+        inst = interface.SQLiteFileInterface(temp_sqlite_path, crypto_handler)
+        inst.store_single_value('foo', b'bar')
+        ix = inst.read_file_index()
+        assert len(ix) == 1
+        assert 'foo' in {x['path'] for x in ix}
+        inst.store_values({
+            'fooo': b'baar',
+            'foooo': b'baaar',
+        })
+        ix = inst.read_file_index()
+        assert len(ix) == 3
+        assert {'foo', 'fooo', 'foooo'} == {x['path'] for x in ix}
+        inst.store_single_value('foo', b'baz', replace=True)
+        ix = inst.read_file_index()
+        assert len(ix) == 3
+        assert {'foo', 'fooo', 'foooo'} == {x['path'] for x in ix}
+        with pytest.raises(RuntimeError):
+            inst.store_single_value('foo', b'baaz', replace=False)
+        ix = inst.read_file_index()
+        assert len(ix) == 3
+        assert {'foo', 'fooo', 'foooo'} == {x['path'] for x in ix}
+        assert inst.restore_single_file(ix[0]['file_id']) == b'baar'
+        assert inst.restore_files(['foo', 'fooo']) == {
+            'foo': b'baz',
+            'fooo': b'baar',
+        }
