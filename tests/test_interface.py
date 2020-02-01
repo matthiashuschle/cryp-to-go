@@ -249,7 +249,6 @@ class TestSQLiteFileInterface:
             core.CryptoHandler.create_random(use_signatures),
         )
         # store single key
-        inst.store_single_value('foo', b'bar')
         inst.store_keys_asymmetric(pubkey_1)
         t_key_enc = inst.crypto_handler.key_enc
         t_key_sign = inst.crypto_handler.key_sign

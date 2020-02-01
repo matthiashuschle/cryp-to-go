@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import Any, MutableMapping
 import peewee as pw
 
 
@@ -35,7 +36,7 @@ class Files(pw.Model):
     n_chunks = pw.IntegerField(default=-1)
     is_physical_file = pw.BooleanField(default=True)
 
-    def to_dict(self):
+    def to_dict(self) -> MutableMapping[str, Any]:
         return {
             'file_id': self.file_id,
             'path': self.path,
