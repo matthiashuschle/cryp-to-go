@@ -5,7 +5,7 @@ from io import BytesIO
 from contextlib import contextmanager
 from typing import Union, List, Tuple, Dict
 from .database import SQLiteHandler
-from .db_models import Settings, Files, Chunks
+from .db_models import Settings, Files, Chunks, AsymKeys
 from .core import (
     KeyDerivationSetup,
     inflate_string,
@@ -15,7 +15,6 @@ from .core import (
 )
 
 _KEY_DERIVATION_SETUP = 'key_derivation_setup'
-_KEY_DECRYPT_INFO_ASYM = 'decrypt_info_asym'
 
 
 class SQLiteFileInterface:
@@ -36,16 +35,19 @@ class SQLiteFileInterface:
     def store_keys_asymmetric(self, pubkey: AsymKey):
         with self.sql_handler.open_db() as database:
             with database.atomic():
-                Settings.create(
-                    key=_KEY_DECRYPT_INFO_ASYM,
-                    value=self.crypto_handler.to_decrypt_info(pubkey, skip_signature=True),
+                AsymKeys.create(
+                    value=json.dumps(self.crypto_handler.to_decrypt_info(pubkey, skip_signature=True)),
                 )
 
     def load_crypto_handler_async(self, privkey: AsymKey):
-        # ToDo: incomplete, needs tests, allow multiple keypairs
         with self.sql_handler.open_db():
-            decrypt_info = Settings.get(Settings.key == _KEY_DECRYPT_INFO_ASYM).value
-        self.crypto_handler = CryptoHandler.from_info(decrypt_info, privkey)
+            for row in AsymKeys.select(AsymKeys.value):
+                try:
+                    self.crypto_handler = CryptoHandler.from_info(json.loads(row.value), privkey)
+                    break
+                except ValueError as exc:
+                    if exc.args[0] != "Decryption failed.":
+                        raise
 
     def load_crypto_handler(self, password):
         with self.sql_handler.open_db():

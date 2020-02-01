@@ -2,6 +2,9 @@ import os
 from contextlib import contextmanager
 import pytest
 import tempfile
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 from peewee import IntegrityError
 from cryp_to_go import interface, core
 
@@ -22,6 +25,38 @@ def temp_sqlite_path():
             raise
     return path
 
+
+def generate_keypair():
+    # create temporary file and close
+    def _touch():
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        return path
+
+    # generate a keypair
+    asym_key = rsa.generate_private_key(
+        backend=default_backend(),
+        public_exponent=65537,
+        key_size=2048
+    )
+    path_private_key = _touch()
+    with open(path_private_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()
+            )
+        )
+    path_public_key = _touch()
+    with open(path_public_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.public_key().public_bytes(
+                serialization.Encoding.OpenSSH,
+                serialization.PublicFormat.OpenSSH
+            )
+        )
+    return path_private_key, path_public_key
 
 @contextmanager
 def temporary_file_structure():
@@ -200,3 +235,44 @@ class TestSQLiteFileInterface:
             'foo': b'baz',
             'fooo': b'baar',
         }
+
+    @pytest.mark.parametrize("use_signatures", [(True,), (False,)])
+    def test_key_storage_async(self, use_signatures, temp_sqlite_path):
+        path_privkey_1, path_pubkey_1 = generate_keypair()
+        path_privkey_2, path_pubkey_2 = generate_keypair()
+        privkey_1 = core.AsymKey.privkey_from_pemfile(path_privkey_1)
+        privkey_2 = core.AsymKey.privkey_from_pemfile(path_privkey_2)
+        pubkey_1 = core.AsymKey.from_pubkey_file(path_pubkey_1)
+        pubkey_2 = core.AsymKey.from_pubkey_file(path_pubkey_2)
+        inst = interface.SQLiteFileInterface(
+            temp_sqlite_path,
+            core.CryptoHandler.create_random(use_signatures),
+        )
+        # store single key
+        inst.store_single_value('foo', b'bar')
+        inst.store_keys_asymmetric(pubkey_1)
+        t_key_enc = inst.crypto_handler.key_enc
+        t_key_sign = inst.crypto_handler.key_sign
+        del inst
+        inst = interface.SQLiteFileInterface(
+            temp_sqlite_path,
+        )
+        inst.load_crypto_handler_async(privkey_1)
+        assert inst.crypto_handler.key_enc == t_key_enc
+        assert inst.crypto_handler.key_sign == t_key_sign
+        # store another key
+        inst.store_keys_asymmetric(pubkey_2)
+        del inst
+        inst = interface.SQLiteFileInterface(
+            temp_sqlite_path,
+        )
+        inst.load_crypto_handler_async(privkey_1)
+        assert inst.crypto_handler.key_enc == t_key_enc
+        assert inst.crypto_handler.key_sign == t_key_sign
+        del inst
+        inst = interface.SQLiteFileInterface(
+            temp_sqlite_path,
+        )
+        inst.load_crypto_handler_async(privkey_2)
+        assert inst.crypto_handler.key_enc == t_key_enc
+        assert inst.crypto_handler.key_sign == t_key_sign

@@ -4,7 +4,7 @@ import peewee as pw
 
 @contextmanager
 def bind_all(database: pw.Database):
-    with database.bind_ctx([Settings, Files, Chunks]):
+    with database.bind_ctx(ALL_TABLES):
         yield
 
 
@@ -18,6 +18,13 @@ class Settings(pw.Model):
     - store complex values as json
     """
     key = pw.CharField(unique=True)
+    value = pw.TextField()
+
+
+class AsymKeys(pw.Model):
+    """ ORM model for asymmetrically encrypted keys.
+    """
+    key_id = pw.AutoField()
     value = pw.TextField()
 
 
@@ -42,3 +49,6 @@ class Chunks(pw.Model):
     fk_file_id = pw.ForeignKeyField(Files, field='file_id')
     i_chunk = pw.IntegerField()
     content = pw.BlobField()
+
+
+ALL_TABLES = [Settings, Files, AsymKeys, Chunks]

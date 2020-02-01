@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import peewee as pw
 from . import db_models
+from . import __version__
 
 
 class SQLiteHandler:
@@ -18,11 +19,19 @@ class SQLiteHandler:
             },
         )
         self._create_tables()
+        self._store_version()
+
+    def _store_version(self):
+        with self.open_db():
+            db_models.Settings.get_or_create(
+                key='VERSION',
+                value=__version__,
+            )
 
     def _create_tables(self):
         with self.open_db() as database:
             if not database.table_exists('Settings'):
-                database.create_tables([db_models.Settings, db_models.Files, db_models.Chunks])
+                database.create_tables(db_models.ALL_TABLES)
 
     @contextmanager
     def open_db(self):
