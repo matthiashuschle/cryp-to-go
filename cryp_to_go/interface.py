@@ -4,7 +4,7 @@ import json
 from io import BytesIO
 from contextlib import contextmanager
 from typing import Union, Tuple, Iterable, Generator, TypeVar, Sequence, Mapping, BinaryIO, Any
-from peewee import SqliteDatabase
+from peewee import SqliteDatabase, DoesNotExist
 from .database import SQLiteHandler
 from .db_models import Settings, Files, Chunks, AsymKeys
 from .core import (
@@ -35,6 +35,15 @@ class SQLiteFileInterface:
                     key=_KEY_DERIVATION_SETUP,
                     value=json.dumps(kds.to_dict())
                 )
+
+    def has_key_derivation_info(self) -> bool:
+        """ Checks if key derivation info is available. """
+        with self.sql_handler.open_db():
+            try:
+                Settings.get(Settings.key == _KEY_DERIVATION_SETUP)
+                return True
+            except DoesNotExist:
+                return False
 
     def store_keys_asymmetric(self, pubkey: AsymKey) -> None:
         """ Save the encryption and signature keys asymmetrically.
