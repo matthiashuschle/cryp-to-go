@@ -122,6 +122,7 @@ class SQLiteFileInterface:
         - only paths in or below current working directory are allowed
         """
         cwd = pathlib.PurePath(os.getcwd())
+        file_list = [os.path.join(str(cwd), x) if not os.path.isabs(x) else x for x in file_list]
         paths = [pathlib.Path(x) for x in file_list]
         if not all(x.exists() for x in paths):
             raise OSError(

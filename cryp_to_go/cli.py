@@ -124,7 +124,7 @@ def main() -> None:
     handler = SQLiteCLI(
         filename=opts.storage_file,
         asym_key_public=opts.private_key,
-        asym_key_private=opts.keyfile
+        asym_key_private=opts.pubkey
     )
     decrypt_action = opts.decrypt or opts.list
     if decrypt_action:
@@ -133,11 +133,11 @@ def main() -> None:
         handler.get_write_access(opts.always_derive)
     if opts.append_key:
         handler.append_key()
-    files = [os.path.abspath(file) for file in opts.files]
+    files = opts.files
     if opts.encrypt:
-        handler.interface.store_files(opts.files)
+        print(handler.interface.store_files(opts.files))
     elif opts.decrypt:
-        handler.interface.restore_files(files)
+        print(handler.interface.restore_files(files))
     elif opts.list:
         for doc in handler.interface.read_file_index():
             print(doc['path'])
