@@ -31,16 +31,23 @@ class SQLiteCLI:
 
     @property
     def pubkey(self) -> Union[None, AsymKey]:
-        if self.asym_key_public is None:
+        key_str = self.asym_key_public
+        if key_str is None:
             return None
         if self._pubkey is None:
-            try:
-                self._pubkey = AsymKey.from_pubkey_string(self.asym_key_public)
-            except ValueError as exc:
-                if 'not in the proper format' not in exc.args[0]:
-                    raise
-                self._pubkey = AsymKey.from_pubkey_file(self.asym_key_public)
+            key = self.load_pubkey(key_str)
+            self._pubkey = key
         return self._pubkey
+
+    @staticmethod
+    def load_pubkey(key_str: str) -> AsymKey:
+        try:
+            key = AsymKey.from_pubkey_string(key_str)
+        except ValueError as exc:
+            if 'not in the proper format' not in exc.args[0]:
+                raise
+            key = AsymKey.from_pubkey_file(key_str)
+        return key
 
     @property
     def private_key(self) -> Union[None, AsymKey]:
@@ -78,10 +85,11 @@ class SQLiteCLI:
             if self.pubkey is not None:
                 self.interface.store_keys_asymmetric(self.pubkey)
 
-    def append_key(self) -> None:
-        if self.pubkey is None:
+    def append_key(self, key: AsymKey = None) -> None:
+        key = key or self.pubkey
+        if key is None:
             fail('No public key given for appending.')
-        self.interface.store_keys_asymmetric(self.pubkey)
+        self.interface.store_keys_asymmetric(key)
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -108,7 +116,7 @@ def get_parser() -> argparse.ArgumentParser:
                         help='storage file to use.')
     parser.add_argument('--always_derive', action='store_true',
                         help='encryption only: new keys are created from a password even if a public key is provided')
-    parser.add_argument('--append_key', action='store_true',
+    parser.add_argument('--append_key', type=str, default=None,
                         help='enable access via given key pair (no duplicate check)')
     parser.add_argument('files', nargs=argparse.REMAINDER)
     return parser
@@ -132,7 +140,7 @@ def main() -> None:
     else:
         handler.get_write_access(opts.always_derive)
     if opts.append_key:
-        handler.append_key()
+        handler.append_key(handler.load_pubkey(opts.append_key))
     files = opts.files
     if opts.encrypt:
         print(handler.interface.store_files(opts.files))
