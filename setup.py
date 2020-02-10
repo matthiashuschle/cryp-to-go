@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name='cryp-to-go-matthiashuschle',
+    name='cryp-to-go',
     version='0.1.1',
     packages=find_packages(),
     install_requires=['pynacl>=1.3.0', 'cryptography>=2.8', 'peewee'],
