@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name='cryp-to-go',
-    version='0.1.1',
+    version='0.2.0',
     packages=find_packages(),
     install_requires=['pynacl>=1.3.0', 'cryptography>=2.8', 'peewee'],
     url='https://github.com/matthiashuschle/cryp-to-go',

@@ -14,6 +14,7 @@ from .core import (
     CryptoHandler,
     AsymKey,
 )
+from .path_handler import SubPath
 
 T = TypeVar('T')
 _KEY_DERIVATION_SETUP = 'key_derivation_setup'
@@ -121,31 +122,26 @@ class SQLiteFileInterface:
         - elements of `file_list` must be absolute file paths
         - only paths in or below current working directory are allowed
         """
-        cwd = pathlib.PurePath(os.getcwd())
-        file_list = [os.path.join(str(cwd), x) if not os.path.isabs(x) else x for x in file_list]
-        paths = [pathlib.Path(x) for x in file_list]
-        if not all(x.exists() for x in paths):
+        file_list = [SubPath.from_any_path(x, pathlib.Path(os.getcwd())) for x in file_list]
+        # file_list = [os.path.join(str(cwd), x) if not os.path.isabs(x) else x for x in file_list]
+        # paths = [pathlib.Path(x) for x in file_list]
+        if not all(x.relative_path.exists() for x in file_list):
             raise OSError(
-                'missing file: ' + repr([x for x in file_list if not pathlib.Path(x).exists()]))
-        relative_paths = [pathlib.PurePath(x).relative_to(cwd) for x in file_list]
-        if any(x.is_dir() for x in paths):
+                'missing file: ' + repr([str(x) for x in file_list if not x.relative_path.exists()]))
+        # relative_paths = [pathlib.PurePath(x).relative_to(cwd) for x in file_list]
+        if any(x.relative_path.is_dir() for x in file_list):
             raise OSError(
-                'target is not a file: ' + repr([x for x in paths if x.is_dir()]))
-        if any('..' in x.parts for x in relative_paths):
-            raise ValueError(
-                '".." not allowed in target path: '
-                + repr([x for x in relative_paths if '..' in x.parts])
-            )
+                'target is not a file: ' + repr([str(x) for x in file_list if x.relative_path.is_dir()]))
         enc_info = {}
-        for file in relative_paths:
+        for file in file_list:
             file_id = self.store_single_file(file)
-            enc_info[file] = (file_id, self.crypto_handler.signature)
+            enc_info[str(file)] = (file_id, self.crypto_handler.signature)
         return enc_info
 
     @contextmanager
     def _reader_encrypt_file(
             self,
-            file: str,
+            file: SubPath,
             outfile: Union[str, None] = None
     ) -> Generator[Tuple[SqliteDatabase, Files, BinaryIO], None, None]:
         """ Context manager for file encryption stream to Chunks table.
@@ -153,10 +149,10 @@ class SQLiteFileInterface:
         with self.sql_handler.open_db() as db:
             with db.atomic():
                 file_entry = Files.create(
-                    path=self.crypto_handler.encrypt_snippet(inflate_string(str(file))),
+                    path=self.crypto_handler.encrypt_snippet(inflate_string(file.slashed_string)),
                     encrypted_file_path=outfile,
                 )
-            with open(file, 'rb') as stream_in:
+            with open(str(file), 'rb') as stream_in:
                 with self.crypto_handler.create_signature():
                     yield db, file_entry, stream_in
 
@@ -229,7 +225,7 @@ class SQLiteFileInterface:
             file_entry.n_chunks = n_chunks
             file_entry.save()
 
-    def store_single_file(self, file: str, outfile: Union[str, None] = None) -> int:
+    def store_single_file(self, file: SubPath, outfile: Union[str, None] = None) -> int:
         """ Store encrypted file content in Files and Chunks.
 
         Returns created Files.file_id.
@@ -289,11 +285,11 @@ class SQLiteFileInterface:
 
         Returns path.
         """
-        target_path = deflate_string(self.crypto_handler.decrypt_snippet(file.path))
-        dirname = os.path.dirname(target_path)
-        if len(dirname):
+        target_path = SubPath(deflate_string(self.crypto_handler.decrypt_snippet(file.path)))
+        dirname = target_path.relative_path.parent
+        if dirname != '.':
             os.makedirs(dirname, exist_ok=True)
-        with open(target_path, 'wb') as f_out:
+        with open(str(target_path), 'wb') as f_out:
             with self.crypto_handler.verify_signature(signature):
                 if file.encrypted_file_path:
                     with open(file.encrypted_file_path, 'rb') as f_in:
@@ -302,7 +298,7 @@ class SQLiteFileInterface:
                 else:
                     for row in self._iter_file_chunks(file):
                         f_out.write(self.crypto_handler.decrypt_chunk(row.content))
-        return target_path
+        return str(target_path)
 
     @staticmethod
     def _iter_file_chunks(file: Files) -> Generator[Chunks, None, None]:

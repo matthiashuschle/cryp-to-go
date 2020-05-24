@@ -58,6 +58,7 @@ def generate_keypair():
         )
     return path_private_key, path_public_key
 
+
 @contextmanager
 def temporary_file_structure():
     try:
@@ -181,9 +182,11 @@ class TestSQLiteFileInterface:
                 inst.store_files([resolve('subdir'), resolve('foo100.dat')])
             assert 'subdir' in exc_info.value.args[0]
             assert 'foo100' not in exc_info.value.args[0]
-            with pytest.raises(ValueError, match='not allowed') as exc_info:
-                inst.store_files([resolve(os.path.join('subdir', '..', 'subdir', 'foo300.dat')), resolve('foo100.dat')])
-            assert '..' in exc_info.value.args[0]
+            with pytest.raises(ValueError, match='does not start with') as exc_info:
+                inst.store_files([resolve(
+                    os.path.join('subdir', '..', '..', 'rogue_dir', 'foo300.dat')
+                ), resolve('foo100.dat')])
+            assert 'foo300' in exc_info.value.args[0]
             assert 'foo100' not in exc_info.value.args[0]
 
             # test actual file storage
